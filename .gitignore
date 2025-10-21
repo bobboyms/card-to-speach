@@ -1,0 +1,90 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build artifacts
+.Python
+build/
+dist/
+wheels/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+*.egg
+MANIFEST
+share/python-wheels/
+
+# PyInstaller
+*.spec
+*.manifest
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+.pytest_cache/
+.nox/
+.tox/
+.cache
+coverage.xml
+*.cover
+*.py,cover
+.coverage
+.coverage.*
+htmlcov/
+pytestdebug.log
+.hypothesis/
+
+# Documentation builds
+docs/_build/
+site/
+
+# Type checker caches
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+dmypy.json
+.dmypy.json
+
+# Jupyter and IPython
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# Virtual environments
+.venv/
+.env/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE & editor settings
+.idea/
+.vscode/
+*.swp
+
+# OS artifacts
+.DS_Store
+
+# Package / environment managers
+.poetry/
+poetry.lock
+Pipfile.lock
+
+# Application data
+*.db
+*.sqlite
+uploads/
+gravacoes/
