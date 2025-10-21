@@ -9,7 +9,7 @@ def _mk_deck(client, name="geo"):
     return r.json()
 
 def _mk_card(client, deck="geo", front="Q?", back="A"):
-    r = client.post("/cards", json={"front": front, "back": back, "deck": deck})
+    r = client.post("/cards", json={"content":{"front": front, "back": back}, "deck": deck})
     assert r.status_code == 201, r.text
     return r.json()
 

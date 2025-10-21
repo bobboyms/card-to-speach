@@ -9,7 +9,7 @@ def _create_deck(client, name="geo"):
     return r.json()
 
 def _create_card(client, deck="geo", front="Q?", back="A", tags=None):
-    payload = {"front": front, "back": back, "deck": deck}
+    payload = {"content": {"front": front, "back": back}, "deck": deck}
     if tags is not None:
         payload["tags"] = tags
     r = client.post("/cards", json=payload)
