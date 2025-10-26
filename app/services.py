@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, date, timedelta
-from typing import Callable, Dict, Any, Optional, List
+from typing import Callable, Dict, Any, Optional, List, Mapping
 
 from fastapi import HTTPException
 from supermemo2 import first_review, review
 
 from .repositories import DeckRepository, CardRepository
+from .time_utils import utc_now
 from .schemas import (
     DeckCreate,
     DeckRename,
@@ -44,12 +45,13 @@ class DeckService:
         if self._repo.exists(name):
             raise HTTPException(status_code=409, detail="Deck already exists")
         self._repo.insert(name)
-        return DeckOut(name=name)
+        return DeckOut(name=name, due_cards=0, total_cards=0)
 
     def list(self) -> List[DeckOut]:
-        """Return all decks ordered alphabetically."""
-        rows = self._repo.list_all()
-        return [DeckOut(name=row["name"]) for row in rows]
+        """Return all decks ordered alphabetically along with card statistics."""
+        now_iso = utc_now().isoformat(timespec="seconds")
+        rows = self._repo.list_with_counts(now_iso)
+        return [self._row_to_deck_out(row) for row in rows]
 
     def rename(self, name: str, payload: DeckRename) -> DeckOut:
         """Rename a deck; raise 404 when the source deck does not exist."""
@@ -59,7 +61,19 @@ class DeckService:
         rowcount = self._repo.update_name(name, new_name)
         if rowcount == 0:
             raise HTTPException(status_code=404, detail="Deck not found")
-        return DeckOut(name=new_name)
+        now_iso = utc_now().isoformat(timespec="seconds")
+        rows = self._repo.list_with_counts(now_iso)
+        stats = next((row for row in rows if row["name"] == new_name), None)
+        return self._row_to_deck_out(stats) if stats else DeckOut(name=new_name, due_cards=0, total_cards=0)
+
+    @staticmethod
+    def _row_to_deck_out(row: Mapping[str, Any]) -> DeckOut:
+        """Build a DeckOut instance from a repository row."""
+        return DeckOut(
+            name=row["name"],
+            due_cards=int(row["due_cards"] or 0),
+            total_cards=int(row["total_cards"] or 0),
+        )
 
     def delete(self, name: str) -> None:
         """Delete a deck; raise 404 when the deck is missing."""

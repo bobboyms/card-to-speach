@@ -34,6 +34,21 @@ class DeckRepository:
         with self._db.connect() as connection:
             return connection.execute("SELECT name FROM decks ORDER BY name").fetchall()
 
+    def list_with_counts(self, now_iso: str) -> List[sqlite3.Row]:
+        """Return decks alongside total and due card counts."""
+        query = """
+            SELECT
+                d.name AS name,
+                COUNT(c.id) AS total_cards,
+                COUNT(CASE WHEN c.due_ts IS NOT NULL AND c.due_ts <= :now THEN 1 END) AS due_cards
+            FROM decks d
+            LEFT JOIN cards c ON c.deck_name = d.name
+            GROUP BY d.name
+            ORDER BY d.name
+        """
+        with self._db.connect() as connection:
+            return connection.execute(query, {"now": now_iso}).fetchall()
+
     def update_name(self, current: str, new_name: str) -> int:
         with self._db.connect() as connection:
             cursor = connection.execute("UPDATE decks SET name=? WHERE name=?", (new_name, current))

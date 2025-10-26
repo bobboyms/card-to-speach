@@ -17,6 +17,8 @@ class DeckRename(BaseModel):
 
 class DeckOut(BaseModel):
     name: str
+    due_cards: int
+    total_cards: int
 
 
 class CardCreate(BaseModel):
