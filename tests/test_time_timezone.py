@@ -7,10 +7,13 @@ def test_graduated_not_advanced_by_learn_ahead(app_client, fixed_now, monkeypatc
     Graduados não usam learn-ahead: só entram quando due_ts <= agora.
     """
     c = app_client
-    c.post("/decks", json={"name":"geo"})
-    card = c.post("/cards", json={"content":{"front":"Q","back":"A"},"deck":"geo"}).json()
+    deck = c.post("/decks", json={"name":"geo"}).json()
+    card = c.post(
+        "/cards",
+        json={"content":{"front":"Q","back":"A"},"deck_id":deck["public_id"]},
+    ).json()
     # Gradua com EASY → due = hoje+4 às 00:00
-    c.post(f"/cards/{card['id']}/review", json={"button":"easy"})
+    c.post(f"/cards/{card['public_id']}/review", json={"button":"easy"})
 
     # Avança para antes do due (ontem)
     before_due = fixed_now - timedelta(days=1)
@@ -18,5 +21,5 @@ def test_graduated_not_advanced_by_learn_ahead(app_client, fixed_now, monkeypatc
     monkeypatch.setattr(api, "utc_today", lambda: before_due.date(), raising=True)
 
     # Não deve haver nada devido
-    r = c.get("/reviews/next", params={"deck":"geo"})
+    r = c.get("/reviews/next", params={"deck_id":deck["public_id"]})
     assert r.status_code == 404

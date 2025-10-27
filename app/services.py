@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, date, timedelta
 from typing import Callable, Dict, Any, Optional, List, Mapping
+from uuid import uuid4
 
 from fastapi import HTTPException
 from supermemo2 import first_review, review
@@ -33,9 +34,16 @@ class DeckService:
         self._repo = repo
 
     def ensure_exists(self, deck_name: str) -> None:
-        """Raise 404 if the given deck does not exist."""
+        """Raise 404 if the given deck does not exist by name."""
         if not self._repo.exists(deck_name):
             raise HTTPException(status_code=404, detail=f"Deck '{deck_name}' does not exist")
+
+    def get_by_public_id(self, public_id: str) -> Mapping[str, Any]:
+        """Return deck information by its public identifier."""
+        row = self._repo.find_by_public_id(public_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Deck not found")
+        return row
 
     def create(self, payload: DeckCreate) -> DeckOut:
         """Create a new deck and return its representation."""
@@ -44,8 +52,9 @@ class DeckService:
             raise HTTPException(status_code=400, detail="Deck name cannot be empty")
         if self._repo.exists(name):
             raise HTTPException(status_code=409, detail="Deck already exists")
-        self._repo.insert(name)
-        return DeckOut(name=name, due_cards=0, total_cards=0)
+        public_id = str(uuid4())
+        self._repo.insert(name, public_id)
+        return DeckOut(public_id=public_id, name=name, due_cards=0, total_cards=0)
 
     def list(self) -> List[DeckOut]:
         """Return all decks ordered alphabetically along with card statistics."""
@@ -53,31 +62,40 @@ class DeckService:
         rows = self._repo.list_with_counts(now_iso)
         return [self._row_to_deck_out(row) for row in rows]
 
-    def rename(self, name: str, payload: DeckRename) -> DeckOut:
-        """Rename a deck; raise 404 when the source deck does not exist."""
+    def rename(self, public_id: str, payload: DeckRename) -> DeckOut:
+        """Rename a deck using its public identifier; raise 404 when missing."""
         new_name = payload.new_name.strip()
         if not new_name:
             raise HTTPException(status_code=400, detail="New deck name is invalid")
-        rowcount = self._repo.update_name(name, new_name)
+        deck_row = self._repo.find_by_public_id(public_id)
+        if not deck_row:
+            raise HTTPException(status_code=404, detail="Deck not found")
+        rowcount = self._repo.update_name_by_public_id(public_id, new_name)
         if rowcount == 0:
             raise HTTPException(status_code=404, detail="Deck not found")
         now_iso = utc_now().isoformat(timespec="seconds")
         rows = self._repo.list_with_counts(now_iso)
-        stats = next((row for row in rows if row["name"] == new_name), None)
-        return self._row_to_deck_out(stats) if stats else DeckOut(name=new_name, due_cards=0, total_cards=0)
+        stats = next((row for row in rows if row["public_id"] == public_id), None)
+        if stats:
+            return self._row_to_deck_out(stats)
+        deck_row = self._repo.find_by_public_id(public_id)
+        if not deck_row:
+            raise HTTPException(status_code=404, detail="Deck not found after rename")
+        return DeckOut(public_id=deck_row["public_id"], name=deck_row["name"], due_cards=0, total_cards=0)
 
     @staticmethod
     def _row_to_deck_out(row: Mapping[str, Any]) -> DeckOut:
         """Build a DeckOut instance from a repository row."""
         return DeckOut(
+            public_id=row["public_id"],
             name=row["name"],
             due_cards=int(row["due_cards"] or 0),
             total_cards=int(row["total_cards"] or 0),
         )
 
-    def delete(self, name: str) -> None:
-        """Delete a deck; raise 404 when the deck is missing."""
-        rowcount = self._repo.delete(name)
+    def delete(self, public_id: str) -> None:
+        """Delete a deck using its public identifier; raise 404 when missing."""
+        rowcount = self._repo.delete_by_public_id(public_id)
         if rowcount == 0:
             raise HTTPException(status_code=404, detail="Deck not found")
 
@@ -98,14 +116,18 @@ class CardService:
 
     def create(self, payload: CardCreate) -> CardOut:
         """Insert a new card in learning mode and return its API model."""
-        deck_name = payload.deck.strip()
-        self._deck_service.ensure_exists(deck_name)
+        deck_id = payload.deck_id.strip()
+        if not deck_id:
+            raise HTTPException(status_code=400, detail="Deck public id cannot be empty")
+        self._deck_service.get_by_public_id(deck_id)
         now = self._utc_now()
         tags_csv = self._serialize_tags(payload.tags)
         content_json = self._serialize_content(payload.content)
+        card_public_id = str(uuid4())
         row = self._repo.insert(
+            public_id=card_public_id,
             content_json=content_json,
-            deck_name=deck_name,
+            deck_id=deck_id,
             tags_csv=tags_csv,
             repetitions=0,
             interval=0,
@@ -121,29 +143,41 @@ class CardService:
 
     def list_by_deck(self, deck: str, limit: int) -> List[CardOut]:
         """Return cards for a deck ordered by due timestamp."""
-        self._deck_service.ensure_exists(deck)
-        rows = self._repo.list_by_deck(deck, limit)
+        deck_id = deck.strip()
+        if not deck_id:
+            raise HTTPException(status_code=404, detail="Deck not found")
+        self._deck_service.get_by_public_id(deck_id)
+        rows = self._repo.list_by_deck(deck_id, limit)
         return [self._row_to_cardout(row) for row in rows]
 
     def list_due(self, deck: str, limit: int, offset: int) -> CardsPage:
         """Return paginated due cards for a deck."""
-        self._deck_service.ensure_exists(deck)
+        deck_id = deck.strip()
+        if not deck_id:
+            raise HTTPException(status_code=404, detail="Deck not found")
+        self._deck_service.get_by_public_id(deck_id)
         now_iso = self._utc_now().isoformat(timespec="seconds")
-        total, rows = self._repo.list_due(deck, now_iso, limit, offset)
+        total, rows = self._repo.list_due(deck_id, now_iso, limit, offset)
         items = [self._row_to_cardout(row) for row in rows]
         next_off = offset + limit if offset + limit < total else None
         return CardsPage(items=items, total=int(total), limit=limit, offset=offset, next_offset=next_off)
 
-    def get(self, card_id: int) -> CardOut:
-        """Fetch a card by ID and return its API model."""
-        row = self._repo.fetch_by_id(card_id)
+    def get(self, card_public_id: str) -> CardOut:
+        """Fetch a card by public ID and return its API model."""
+        public_id = card_public_id.strip()
+        if not public_id:
+            raise HTTPException(status_code=404, detail="Card not found")
+        row = self._repo.fetch_by_public_id(public_id)
         if not row:
             raise HTTPException(status_code=404, detail="Card not found")
         return self._row_to_cardout(row)
 
-    def update(self, card_id: int, payload: CardUpdate) -> CardOut:
+    def update(self, card_public_id: str, payload: CardUpdate) -> CardOut:
         """Update card content, deck, or tags and return the updated model."""
-        row = self._repo.fetch_by_id(card_id)
+        public_id = card_public_id.strip()
+        if not public_id:
+            raise HTTPException(status_code=404, detail="Card not found")
+        row = self._repo.fetch_by_public_id(public_id)
         if not row:
             raise HTTPException(status_code=404, detail="Card not found")
         if payload.content is not None:
@@ -151,27 +185,37 @@ class CardService:
         else:
             new_content = row["content"]
 
-        if payload.deck is not None:
-            deck_name = payload.deck.strip()
-            self._deck_service.ensure_exists(deck_name)
-            new_deck = deck_name
+        if payload.deck_id is not None:
+            deck_id = payload.deck_id.strip()
+            if not deck_id:
+                raise HTTPException(status_code=400, detail="Deck public id cannot be empty")
+            self._deck_service.get_by_public_id(deck_id)
+            new_deck_id = deck_id
         else:
-            new_deck = row["deck_name"]
+            new_deck_id = row["deck_id"]
 
         new_tags = self._serialize_tags(payload.tags) if payload.tags is not None else row["tags"]
 
-        updated = self._repo.update_card(card_id, content=new_content, deck_name=new_deck, tags=new_tags)
+        updated = self._repo.update_card_by_public_id(
+            public_id, content=new_content, deck_id=new_deck_id, tags=new_tags
+        )
         return self._row_to_cardout(updated)
 
-    def delete(self, card_id: int) -> None:
-        """Delete a card by ID; raise 404 when not found."""
-        deleted = self._repo.delete(card_id)
+    def delete(self, card_public_id: str) -> None:
+        """Delete a card by public ID; raise 404 when not found."""
+        public_id = card_public_id.strip()
+        if not public_id:
+            raise HTTPException(status_code=404, detail="Card not found")
+        deleted = self._repo.delete_by_public_id(public_id)
         if deleted == 0:
             raise HTTPException(status_code=404, detail="Card not found")
 
-    def fetch_row(self, card_id: int) -> Dict[str, Any]:
+    def fetch_row(self, card_public_id: str) -> Dict[str, Any]:
         """Return the raw database row for a card (used by review logic)."""
-        row = self._repo.fetch_by_id(card_id)
+        public_id = card_public_id.strip()
+        if not public_id:
+            raise HTTPException(status_code=404, detail="Card not found")
+        row = self._repo.fetch_by_public_id(public_id)
         if not row:
             raise HTTPException(status_code=404, detail="Card not found")
         return row
@@ -215,11 +259,13 @@ class CardService:
         """Build a CardOut instance from a database row."""
         tags_list = row["tags"].split(",") if row["tags"] else None
         parsed_content = self._parse_content(row["content"])
+        normalized_tags = [tag for tag in (tags_list or []) if tag]
         return CardOut(
-            id=row["id"],
+            public_id=row["public_id"],
             content=parsed_content,
-            deck=row["deck_name"],
-            tags=[tag for tag in (tags_list or []) if tag],
+            deck_id=row["deck_id"],
+            deck_name=row["deck_name"],
+            tags=normalized_tags or None,
             repetitions=row["repetitions"],
             interval=row["interval"],
             efactor=float(row["efactor"]),
@@ -263,28 +309,33 @@ class ReviewService:
         self._learn_ahead_if_empty = learn_ahead_if_empty
         self._min_ef = min_ef
 
-    def peek_next_due(self, deck: str) -> CardOut:
+    def peek_next_due(self, deck_public_id: str) -> CardOut:
         """Return the next card that should be studied for the given deck."""
-        row = self._select_next_row(deck)
+        row = self._select_next_row(deck_public_id)
         return self._card_service.to_card_out(row)
 
-    def review_next_due_by_grade(self, deck: str, grade: int) -> ReviewOut:
+    def review_next_due_by_grade(self, deck_public_id: str, grade: int) -> ReviewOut:
         """Apply an SM-2 grade to the next due card."""
-        row = self._select_next_row(deck)
+        row = self._select_next_row(deck_public_id)
         return self._apply_review(row, grade)
 
-    def review_card_button(self, card_id: int, button: str) -> ReviewOut:
+    def review_card_button(self, card_public_id: str, button: str) -> ReviewOut:
         """Apply a review action (again/hard/good/easy) to a specific card."""
-        row = self._card_service.fetch_row(card_id)
+        row = self._card_service.fetch_row(card_public_id)
         return self._review_with_button(row, button)
 
-    def _select_next_row(self, deck: str) -> Dict[str, Any]:
+    def _select_next_row(self, deck_public_id: str) -> Dict[str, Any]:
         """Select the next card row according to due rules and learn-ahead policy."""
-        self._deck_service.ensure_exists(deck)
+        deck_id = deck_public_id.strip()
+        if not deck_id:
+            raise HTTPException(status_code=404, detail="Deck not found")
+        self._deck_service.get_by_public_id(deck_id)
         now = self._utc_now()
         now_iso = now.isoformat(timespec="seconds")
         ahead_iso = (now + timedelta(minutes=self._learn_ahead_minutes())).isoformat(timespec="seconds")
-        row = self._card_repo.select_next_for_review(deck, now_iso, ahead_iso, self._learn_ahead_if_empty())
+        row = self._card_repo.select_next_for_review(
+            deck_id, now_iso, ahead_iso, self._learn_ahead_if_empty()
+        )
         if not row:
             raise HTTPException(status_code=404, detail="No card due right now")
         return row
@@ -353,7 +404,7 @@ class ReviewService:
                 efactor=float(updated["efactor"]),
                 repetitions=int(updated["repetitions"]),
                 lapses=int(updated["lapses"]),
-                reviewed_card_id=int(row["id"]),
+                reviewed_card_public_id=row["public_id"],
             )
 
         grade = BUTTON_TO_GRADE[button]
@@ -407,5 +458,5 @@ class ReviewService:
             efactor=new_efactor,
             repetitions=new_repetitions,
             lapses=int(lapses),
-            reviewed_card_id=int(row["id"]),
+            reviewed_card_public_id=row["public_id"],
         )

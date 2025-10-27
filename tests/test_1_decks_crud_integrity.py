@@ -13,23 +13,25 @@ def test_create_deck_empty_name(app_client):
 
 def test_rename_deck_propagates_to_cards(app_client):
     c = app_client
-    c.post("/decks", json={"name": "geo"})
+    deck_geo = c.post("/decks", json={"name": "geo"}).json()
     c.post("/decks", json={"name": "hist"})
-    card = c.post("/cards", json={"content":{"front":"Q","back":"A"},"deck":"geo"}).json()
-    r = c.patch("/decks/geo", json={"new_name": "geografia"})
+    card = c.post("/cards", json={"content":{"front":"Q","back":"A"},"deck_id":deck_geo["public_id"]}).json()
+    r = c.patch(f"/decks/{deck_geo['public_id']}", json={"new_name": "geografia"})
     assert r.status_code == 200
-    rlist = c.get("/cards", params={"deck": "geografia"})
+    rlist = c.get("/cards", params={"deck_id": deck_geo["public_id"]})
     assert rlist.status_code == 200
-    assert any(x["id"] == card["id"] for x in rlist.json())
-    r404 = c.get("/cards", params={"deck":"geo"})
-    assert r404.status_code == 404
+    cards = rlist.json()
+    assert any(x["public_id"] == card["public_id"] for x in cards)
+    assert all(x["deck_name"] == "geografia" for x in cards)
 
 def test_delete_deck_sets_cards_null(app_client):
     c = app_client
-    c.post("/decks", json={"name":"geo"})
-    card = c.post("/cards", json={"content":{"front":"Q","back":"A"},"deck":"geo"}).json()
-    r = c.delete("/decks/geo")
+    deck_geo = c.post("/decks", json={"name":"geo"}).json()
+    card = c.post("/cards", json={"content":{"front":"Q","back":"A"},"deck_id":deck_geo["public_id"]}).json()
+    r = c.delete(f"/decks/{deck_geo['public_id']}")
     assert r.status_code == 204
-    r2 = c.get(f"/cards/{card['id']}")
+    r2 = c.get(f"/cards/{card['public_id']}")
     assert r2.status_code == 200
-    assert r2.json()["deck"] is None
+    fetched = r2.json()
+    assert fetched["deck_id"] is None
+    assert fetched["deck_name"] is None

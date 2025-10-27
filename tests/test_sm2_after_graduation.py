@@ -8,15 +8,18 @@ def _mk_deck(client, name="geo"):
     assert r.status_code == 201, r.text
     return r.json()
 
-def _mk_card(client, deck="geo", front="Q?", back="A"):
-    r = client.post("/cards", json={"content":{"front": front, "back": back}, "deck": deck})
+def _mk_card(client, deck_id, front="Q?", back="A"):
+    r = client.post(
+        "/cards",
+        json={"content":{"front": front, "back": back}, "deck_id": deck_id},
+    )
     assert r.status_code == 201, r.text
     return r.json()
 
-def _row(card_id):
+def _row(card_public_id):
     with sqlite3.connect(api.DB) as db:
         db.row_factory = sqlite3.Row
-        return db.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+        return db.execute("SELECT * FROM cards WHERE public_id=?", (card_public_id,)).fetchone()
 
 def test_sm2_success_normaliza_e_atualiza_campos(app_client, fixed_now, monkeypatch):
     """
@@ -26,11 +29,11 @@ def test_sm2_success_normaliza_e_atualiza_campos(app_client, fixed_now, monkeypa
       - manter is_learning=0.
     """
     c = app_client
-    _mk_deck(c, "geo")
-    card = _mk_card(c, deck="geo")
+    deck = _mk_deck(c, "geo")
+    card = _mk_card(c, deck_id=deck["public_id"])
 
     # Gradua rápido via EASY (is_learning=0, interval=GRADUATE_EASY_DAYS, due_ts = 00:00 do dia devido)
-    r = c.post(f"/cards/{card['id']}/review", json={"button": "easy"})
+    r = c.post(f"/cards/{card['public_id']}/review", json={"button": "easy"})
     assert r.status_code == 200, r.text
 
     # Avança relógio para o início do dia devido (para poder revisar no SM-2)
@@ -40,7 +43,7 @@ def test_sm2_success_normaliza_e_atualiza_campos(app_client, fixed_now, monkeypa
     monkeypatch.setattr(api, "utc_today", lambda: now2.date(), raising=True)
 
     # Faz uma revisão SM-2 com grade=4
-    r2 = c.post("/reviews/next", params={"deck": "geo"}, json={"grade": 4})
+    r2 = c.post("/reviews/next", params={"deck_id": deck["public_id"]}, json={"grade": 4})
     assert r2.status_code == 200, r2.text
     data = r2.json()
 
@@ -51,7 +54,7 @@ def test_sm2_success_normaliza_e_atualiza_campos(app_client, fixed_now, monkeypa
 
     # due/due_ts devem estar normalizados para 00:00 do (hoje+interval)
     expected_due_day = (now2.date() + timedelta(days=data["interval_days"])).isoformat()
-    row = _row(card["id"])
+    row = _row(card["public_id"])
     assert row["is_learning"] == 0
     assert row["due"] == expected_due_day
     expected_dt = datetime.fromisoformat(expected_due_day + "T00:00:00+00:00")
@@ -65,11 +68,11 @@ def test_sm2_failure_incrementa_lapses_e_agenda_hoje(app_client, fixed_now, monk
       - agendar para 'hoje' (next_dt = now).
     """
     c = app_client
-    _mk_deck(c, "geo")
-    card = _mk_card(c, deck="geo")
+    deck = _mk_deck(c, "geo")
+    card = _mk_card(c, deck_id=deck["public_id"])
 
     # Gradua via EASY
-    r = c.post(f"/cards/{card['id']}/review", json={"button": "easy"})
+    r = c.post(f"/cards/{card['public_id']}/review", json={"button": "easy"})
     assert r.status_code == 200, r.text
 
     # Vira o dia devido para permitir revisar
@@ -79,10 +82,10 @@ def test_sm2_failure_incrementa_lapses_e_agenda_hoje(app_client, fixed_now, monk
     monkeypatch.setattr(api, "utc_today", lambda: now2.date(), raising=True)
 
     # Aplica uma falha (grade=2)
-    r2 = c.post("/reviews/next", params={"deck": "geo"}, json={"grade": 2})
+    r2 = c.post("/reviews/next", params={"deck_id": deck["public_id"]}, json={"grade": 2})
     assert r2.status_code == 200, r2.text
 
-    row = _row(card["id"])
+    row = _row(card["public_id"])
     assert row["is_learning"] == 0
     # lapses incrementado
     assert row["lapses"] >= 1
@@ -100,11 +103,11 @@ def test_botoes_em_graduado_mapeiam_para_grades_e_usam_sm2(app_client, fixed_now
     Validamos com 'again' (lapse) e 'easy' (intervalo alto).
     """
     c = app_client
-    _mk_deck(c, "geo")
-    card = _mk_card(c, deck="geo")
+    deck = _mk_deck(c, "geo")
+    card = _mk_card(c, deck_id=deck["public_id"])
 
     # Gradua via EASY
-    r = c.post(f"/cards/{card['id']}/review", json={"button": "easy"})
+    r = c.post(f"/cards/{card['public_id']}/review", json={"button": "easy"})
     assert r.status_code == 200, r.text
 
     # Vira o dia devido
@@ -114,9 +117,9 @@ def test_botoes_em_graduado_mapeiam_para_grades_e_usam_sm2(app_client, fixed_now
     monkeypatch.setattr(api, "utc_today", lambda: now2.date(), raising=True)
 
     # 'again' em graduado -> grade=0 -> lapse e due = hoje
-    r2 = c.post(f"/cards/{card['id']}/review", json={"button": "again"})
+    r2 = c.post(f"/cards/{card['public_id']}/review", json={"button": "again"})
     assert r2.status_code == 200, r2.text
-    row = _row(card["id"])
+    row = _row(card["public_id"])
     assert row["lapses"] >= 1
     assert row["is_learning"] == 0
     assert row["due"] == now2.date().isoformat()
@@ -126,7 +129,7 @@ def test_botoes_em_graduado_mapeiam_para_grades_e_usam_sm2(app_client, fixed_now
     monkeypatch.setattr(api, "utc_now", lambda: now3, raising=True)
     monkeypatch.setattr(api, "utc_today", lambda: now3.date(), raising=True)
 
-    r3 = c.post(f"/cards/{card['id']}/review", json={"button": "easy"})
+    r3 = c.post(f"/cards/{card['public_id']}/review", json={"button": "easy"})
     assert r3.status_code == 200, r3.text
     data = r3.json()
     assert data["interval_days"] >= 1
@@ -134,7 +137,7 @@ def test_botoes_em_graduado_mapeiam_para_grades_e_usam_sm2(app_client, fixed_now
 
     # Próximo due normalizado para 00:00 do (hoje + interval_days)
     expected_due_day = (now3.date() + timedelta(days=data["interval_days"])).isoformat()
-    row2 = _row(card["id"])
+    row2 = _row(card["public_id"])
     assert row2["due"] == expected_due_day
     expected_dt = datetime.fromisoformat(expected_due_day + "T00:00:00+00:00")
     assert row2["due_ts"] == expected_dt.isoformat(timespec="seconds")

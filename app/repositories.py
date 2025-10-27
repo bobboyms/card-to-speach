@@ -20,43 +20,60 @@ class DeckRepository:
         return self.find_by_name(name) is not None
 
     def find_by_name(self, name: str, *, conn: Optional[sqlite3.Connection] = None) -> Optional[sqlite3.Row]:
-        query = "SELECT name FROM decks WHERE name=?"
+        query = "SELECT id, public_id, name FROM decks WHERE name=?"
         if conn is None:
             with self._db.connect() as connection:
                 return connection.execute(query, (name,)).fetchone()
         return conn.execute(query, (name,)).fetchone()
 
-    def insert(self, name: str) -> None:
+    def find_by_public_id(
+        self, public_id: str, *, conn: Optional[sqlite3.Connection] = None
+    ) -> Optional[sqlite3.Row]:
+        query = "SELECT id, public_id, name FROM decks WHERE public_id=?"
+        if conn is None:
+            with self._db.connect() as connection:
+                return connection.execute(query, (public_id,)).fetchone()
+        return conn.execute(query, (public_id,)).fetchone()
+
+    def insert(self, name: str, public_id: str) -> sqlite3.Row:
         with self._db.connect() as connection:
-            connection.execute("INSERT INTO decks(name) VALUES(?)", (name,))
+            cursor = connection.execute(
+                "INSERT INTO decks(public_id, name) VALUES(?, ?)", (public_id, name)
+            )
+            return connection.execute(
+                "SELECT id, public_id, name FROM decks WHERE id=?", (cursor.lastrowid,)
+            ).fetchone()
 
     def list_all(self) -> List[sqlite3.Row]:
         with self._db.connect() as connection:
-            return connection.execute("SELECT name FROM decks ORDER BY name").fetchall()
+            return connection.execute(
+                "SELECT public_id, name FROM decks ORDER BY name"
+            ).fetchall()
 
     def list_with_counts(self, now_iso: str) -> List[sqlite3.Row]:
         """Return decks alongside total and due card counts."""
         query = """
             SELECT
+                d.public_id AS public_id,
                 d.name AS name,
                 COUNT(c.id) AS total_cards,
                 COUNT(CASE WHEN c.due_ts IS NOT NULL AND c.due_ts <= :now THEN 1 END) AS due_cards
             FROM decks d
-            LEFT JOIN cards c ON c.deck_name = d.name
-            GROUP BY d.name
+            LEFT JOIN cards c ON c.deck_id = d.public_id
+            GROUP BY d.id
             ORDER BY d.name
         """
         with self._db.connect() as connection:
             return connection.execute(query, {"now": now_iso}).fetchall()
 
-    def update_name(self, current: str, new_name: str) -> int:
+    def update_name_by_public_id(self, public_id: str, new_name: str) -> int:
         with self._db.connect() as connection:
-            cursor = connection.execute("UPDATE decks SET name=? WHERE name=?", (new_name, current))
+            cursor = connection.execute("UPDATE decks SET name=? WHERE public_id=?", (new_name, public_id))
         return cursor.rowcount
 
-    def delete(self, name: str) -> int:
+    def delete_by_public_id(self, public_id: str) -> int:
         with self._db.connect() as connection:
-            cursor = connection.execute("DELETE FROM decks WHERE name=?", (name,))
+            cursor = connection.execute("DELETE FROM decks WHERE public_id=?", (public_id,))
         return cursor.rowcount
 
 
@@ -74,8 +91,9 @@ class CardRepository:
     def insert(
         self,
         *,
+        public_id: str,
         content_json: str,
-        deck_name: str,
+        deck_id: Optional[str],
         tags_csv: Optional[str],
         repetitions: int,
         interval: int,
@@ -90,13 +108,20 @@ class CardRepository:
         with self._db.connect() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO cards(content, deck_name, tags, repetitions, interval, efactor, due,
-                                  last_reviewed, lapses, is_learning, learn_step_idx, due_ts)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO cards(
+                    public_id, content, deck_id, deck_name, tags, repetitions, interval, efactor,
+                    due, last_reviewed, lapses, is_learning, learn_step_idx, due_ts
+                )
+                VALUES(
+                    ?, ?, ?, (SELECT name FROM decks WHERE public_id = ?), ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
+                    public_id,
                     content_json,
-                    deck_name,
+                    deck_id,
+                    deck_id,
                     tags_csv,
                     repetitions,
                     interval,
@@ -111,22 +136,22 @@ class CardRepository:
             )
             return connection.execute("SELECT * FROM cards WHERE id=?", (cursor.lastrowid,)).fetchone()
 
-    def list_by_deck(self, deck: str, limit: int) -> List[sqlite3.Row]:
+    def list_by_deck(self, deck_id: str, limit: int) -> List[sqlite3.Row]:
         with self._db.connect() as connection:
             return connection.execute(
-                "SELECT * FROM cards WHERE deck_name = ? ORDER BY due_ts, id LIMIT ?",
-                (deck, limit),
+                "SELECT * FROM cards WHERE deck_id = ? ORDER BY due_ts, id LIMIT ?",
+                (deck_id, limit),
             ).fetchall()
 
-    def list_due(self, deck: str, now_iso: str, limit: int, offset: int) -> Tuple[int, List[sqlite3.Row]]:
+    def list_due(self, deck_id: str, now_iso: str, limit: int, offset: int) -> Tuple[int, List[sqlite3.Row]]:
         with self._db.connect() as connection:
             total = connection.execute(
-                "SELECT COUNT(*) AS c FROM cards WHERE due_ts <= ? AND deck_name = ?",
-                (now_iso, deck),
+                "SELECT COUNT(*) AS c FROM cards WHERE due_ts <= ? AND deck_id = ?",
+                (now_iso, deck_id),
             ).fetchone()[0]
             rows = connection.execute(
-                "SELECT * FROM cards WHERE due_ts <= ? AND deck_name = ? ORDER BY due_ts, id LIMIT ? OFFSET ?",
-                (now_iso, deck, limit, offset),
+                "SELECT * FROM cards WHERE due_ts <= ? AND deck_id = ? ORDER BY due_ts, id LIMIT ? OFFSET ?",
+                (now_iso, deck_id, limit, offset),
             ).fetchall()
         return int(total), rows
 
@@ -137,17 +162,40 @@ class CardRepository:
                 return connection.execute(query, (card_id,)).fetchone()
         return conn.execute(query, (card_id,)).fetchone()
 
-    def update_card(self, card_id: int, *, content: str, deck_name: Optional[str], tags: Optional[str]) -> sqlite3.Row:
+    def fetch_by_public_id(
+        self, public_id: str, *, conn: Optional[sqlite3.Connection] = None
+    ) -> Optional[sqlite3.Row]:
+        query = "SELECT * FROM cards WHERE public_id=?"
+        if conn is None:
+            with self._db.connect() as connection:
+                return connection.execute(query, (public_id,)).fetchone()
+        return conn.execute(query, (public_id,)).fetchone()
+
+    def update_card_by_public_id(
+        self,
+        public_id: str,
+        *,
+        content: str,
+        deck_id: Optional[str],
+        tags: Optional[str],
+    ) -> sqlite3.Row:
         with self._db.connect() as connection:
             connection.execute(
-                "UPDATE cards SET content=?, deck_name=?, tags=? WHERE id=?",
-                (content, deck_name, tags, card_id),
+                """
+                UPDATE cards
+                SET content=?,
+                    deck_id=?,
+                    deck_name=(SELECT name FROM decks WHERE public_id = ?),
+                    tags=?
+                WHERE public_id=?
+                """,
+                (content, deck_id, deck_id, tags, public_id),
             )
-            return connection.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+            return connection.execute("SELECT * FROM cards WHERE public_id=?", (public_id,)).fetchone()
 
-    def delete(self, card_id: int) -> int:
+    def delete_by_public_id(self, public_id: str) -> int:
         with self._db.connect() as connection:
-            cursor = connection.execute("DELETE FROM cards WHERE id=?", (card_id,))
+            cursor = connection.execute("DELETE FROM cards WHERE public_id=?", (public_id,))
         return cursor.rowcount
 
     def set_due(self, conn: sqlite3.Connection, card_id: int, due_dt: datetime) -> None:
@@ -191,31 +239,31 @@ class CardRepository:
 
     def select_next_for_review(
         self,
-        deck: str,
+        deck_id: str,
         now_iso: str,
         ahead_iso: str,
         allow_learning_fallback: bool,
     ) -> Optional[sqlite3.Row]:
         with self._db.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM cards WHERE due_ts <= ? AND deck_name = ? ORDER BY due_ts, id LIMIT 1",
-                (now_iso, deck),
+                "SELECT * FROM cards WHERE due_ts <= ? AND deck_id = ? ORDER BY due_ts, id LIMIT 1",
+                (now_iso, deck_id),
             ).fetchone()
             if row:
                 return row
             row = connection.execute(
                 """
                 SELECT * FROM cards
-                WHERE is_learning = 1 AND deck_name = ? AND due_ts <= ?
+                WHERE is_learning = 1 AND deck_id = ? AND due_ts <= ?
                 ORDER BY due_ts, id LIMIT 1
                 """,
-                (deck, ahead_iso),
+                (deck_id, ahead_iso),
             ).fetchone()
             if row:
                 return row
             if allow_learning_fallback:
                 row = connection.execute(
-                    "SELECT * FROM cards WHERE is_learning = 1 AND deck_name = ? ORDER BY due_ts, id LIMIT 1",
-                    (deck,),
+                    "SELECT * FROM cards WHERE is_learning = 1 AND deck_id = ? ORDER BY due_ts, id LIMIT 1",
+                    (deck_id,),
                 ).fetchone()
             return row

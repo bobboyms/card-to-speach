@@ -16,6 +16,7 @@ class DeckRename(BaseModel):
 
 
 class DeckOut(BaseModel):
+    public_id: str
     name: str
     due_cards: int
     total_cards: int
@@ -23,7 +24,7 @@ class DeckOut(BaseModel):
 
 class CardCreate(BaseModel):
     content: Dict[str, Any] = Field(..., description="Structured card content")
-    deck: str = Field(..., min_length=1, description="Name of the existing deck")
+    deck_id: str = Field(..., min_length=1, description="Public UUID of the existing deck")
     tags: Optional[List[str]] = None
 
     @field_validator("content")
@@ -36,7 +37,7 @@ class CardCreate(BaseModel):
 
 class CardUpdate(BaseModel):
     content: Optional[Dict[str, Any]] = Field(None, description="New JSON content")
-    deck: Optional[str] = Field(None, min_length=1, description="New deck (optional)")
+    deck_id: Optional[str] = Field(None, min_length=1, description="Target deck public UUID")
     tags: Optional[List[str]] = None
 
     @field_validator("content")
@@ -48,9 +49,10 @@ class CardUpdate(BaseModel):
 
 
 class CardOut(BaseModel):
-    id: int
+    public_id: str
     content: Dict[str, Any]
-    deck: Optional[str]
+    deck_id: Optional[str]
+    deck_name: Optional[str]
     tags: Optional[List[str]]
     repetitions: int
     interval: int
@@ -82,7 +84,7 @@ class ReviewOut(BaseModel):
     efactor: float
     repetitions: int
     lapses: int
-    reviewed_card_id: int
+    reviewed_card_public_id: str
 
 
 class CardsPage(BaseModel):

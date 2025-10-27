@@ -11,13 +11,13 @@ Anki Mini – FastAPI + Decks + Learning Steps (Anki-like) + Learn-Ahead
 • Timezone: UTC (due_ts stored as ISO datetime; due stored as YYYY-MM-DD)
 
 Endpoints (Cards):
-  - POST   /cards                              → create card (deck required, JSON content)
-  - GET    /cards?deck=...&limit=...           → list deck cards (browse)
-  - GET    /cards/due?deck=...&limit&offset    → list due cards (UTC) with pagination
-  - GET    /cards/{card_id}                    → card details
-  - PATCH  /cards/{card_id}                    → update content/tags and optionally move deck
-  - DELETE /cards/{card_id}                    → delete card
-  - POST   /cards/{card_id}/review             → review a specific card (again/hard/good/easy buttons)
+  - POST   /cards                              → create card (deck UUID required, JSON content)
+  - GET    /cards?deck_id=...&limit=...        → list deck cards (browse)
+  - GET    /cards/due?deck_id=...&limit&offset → list due cards (UTC) with pagination
+  - GET    /cards/{card_public_id}             → card details
+  - PATCH  /cards/{card_public_id}             → update content/tags and optionally move deck
+  - DELETE /cards/{card_public_id}             → delete card
+  - POST   /cards/{card_public_id}/review      → review a specific card (again/hard/good/easy buttons)
 
 Endpoints (Decks):
   - POST   /decks                              → create deck (name)
@@ -148,16 +148,16 @@ def list_decks():
     return deck_service.list()
 
 
-@app.patch("/decks/{name}", response_model=DeckOut)
-def rename_deck(name: str, payload: DeckRename):
-    """Rename an existing deck."""
-    return deck_service.rename(name, payload)
+@app.patch("/decks/{public_id}", response_model=DeckOut)
+def rename_deck(public_id: str, payload: DeckRename):
+    """Rename an existing deck identified by its public UUID."""
+    return deck_service.rename(public_id, payload)
 
 
-@app.delete("/decks/{name}", status_code=204)
-def delete_deck(name: str):
-    """Delete the specified deck."""
-    deck_service.delete(name)
+@app.delete("/decks/{public_id}", status_code=204)
+def delete_deck(public_id: str):
+    """Delete the specified deck by its public UUID."""
+    deck_service.delete(public_id)
     return
 
 
@@ -172,39 +172,39 @@ def create_card(payload: CardCreate):
 
 @app.get("/cards", response_model=List[CardOut])
 def list_cards(
-    deck: str = Query(..., description="Deck name"),
+    deck_id: str = Query(..., description="Deck public UUID"),
     limit: int = Query(50, ge=1, le=500),
 ):
     """List cards for a deck ordered by due timestamp."""
-    return card_service.list_by_deck(deck, limit)
+    return card_service.list_by_deck(deck_id, limit)
 
 
 @app.get("/cards/due", response_model=CardsPage)
 def list_due(
-    deck: str = Query(..., description="Deck name"),
+    deck_id: str = Query(..., description="Deck public UUID"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
     """Return paginated due cards for a deck."""
-    return card_service.list_due(deck, limit, offset)
+    return card_service.list_due(deck_id, limit, offset)
 
 
-@app.get("/cards/{card_id}", response_model=CardOut)
-def get_card(card_id: int):
-    """Fetch a card by ID."""
-    return card_service.get(card_id)
+@app.get("/cards/{card_public_id}", response_model=CardOut)
+def get_card(card_public_id: str):
+    """Fetch a card by public UUID."""
+    return card_service.get(card_public_id)
 
 
-@app.patch("/cards/{card_id}", response_model=CardOut)
-def update_card(card_id: int, payload: CardUpdate):
+@app.patch("/cards/{card_public_id}", response_model=CardOut)
+def update_card(card_public_id: str, payload: CardUpdate):
     """Update the content, deck, or tags of a card."""
-    return card_service.update(card_id, payload)
+    return card_service.update(card_public_id, payload)
 
 
-@app.delete("/cards/{card_id}", status_code=204)
-def delete_card(card_id: int):
+@app.delete("/cards/{card_public_id}", status_code=204)
+def delete_card(card_public_id: str):
     """Remove a card from the collection."""
-    card_service.delete(card_id)
+    card_service.delete(card_public_id)
     return
 
 
@@ -212,21 +212,21 @@ def delete_card(card_id: int):
 # Endpoints – Reviews
 # ------------------------
 @app.get("/reviews/next", response_model=CardOut)
-def peek_next_due(deck: str = Query(..., description="Deck name")):
+def peek_next_due(deck_id: str = Query(..., description="Deck public UUID")):
     """Return the next due card for the requested deck using due, learn-ahead, and fallback rules."""
-    return review_service.peek_next_due(deck)
+    return review_service.peek_next_due(deck_id)
 
 
 @app.post("/reviews/next", response_model=ReviewOut)
-def review_next_due_grade(deck: str = Query(..., description="Deck name"), payload: ReviewIn = ...):
+def review_next_due_grade(deck_id: str = Query(..., description="Deck public UUID"), payload: ReviewIn = ...):
     """Apply an SM-2 grade to the next due card (same selection criteria as the GET endpoint)."""
-    return review_service.review_next_due_by_grade(deck, payload.grade)
+    return review_service.review_next_due_by_grade(deck_id, payload.grade)
 
 
-@app.post("/cards/{card_id}/review", response_model=ReviewOut)
-def review_card_button(card_id: int, payload: ReviewButtonIn = Body(...)):
+@app.post("/cards/{card_public_id}/review", response_model=ReviewOut)
+def review_card_button(card_public_id: str, payload: ReviewButtonIn = Body(...)):
     """Review a specific card by mapping the button press to the corresponding SM-2 grade."""
-    return review_service.review_card_button(card_id, payload.button)
+    return review_service.review_card_button(card_public_id, payload.button)
 
 
 # ------------------------

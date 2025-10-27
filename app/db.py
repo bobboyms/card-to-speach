@@ -6,6 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import uuid4
 
 from .config import DB_PATH
 
@@ -36,6 +37,8 @@ class DatabaseManager:
             self._migrate_front_back_to_content(connection)
             self._ensure_learning_columns(connection)
             self._ensure_due_ts_column(connection)
+            self._ensure_card_public_id_column(connection)
+            self._ensure_card_deck_id_column(connection)
             self._ensure_indexes(connection)
 
     @staticmethod
@@ -46,14 +49,23 @@ class DatabaseManager:
 
     @staticmethod
     def _ensure_decks_table(conn_obj: sqlite3.Connection) -> None:
-        """Create the decks table if it does not exist."""
+        """Ensure the decks table provides an internal PK and a public UUID."""
         conn_obj.execute(
             """
             CREATE TABLE IF NOT EXISTS decks (
-                name TEXT PRIMARY KEY
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL UNIQUE
             );
             """
         )
+        has_id = DatabaseManager._column_exists(conn_obj, "decks", "id")
+        has_public_id = DatabaseManager._column_exists(conn_obj, "decks", "public_id")
+        if not has_id:
+            DatabaseManager._migrate_decks_add_ids(conn_obj)
+            has_public_id = DatabaseManager._column_exists(conn_obj, "decks", "public_id")
+        if not has_public_id:
+            DatabaseManager._add_public_ids(conn_obj)
 
     @staticmethod
     def _ensure_cards_table(conn_obj: sqlite3.Connection) -> None:
@@ -62,7 +74,9 @@ class DatabaseManager:
             """
             CREATE TABLE IF NOT EXISTS cards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT NOT NULL UNIQUE,
                 content TEXT NOT NULL,
+                deck_id TEXT REFERENCES decks(public_id) ON UPDATE CASCADE ON DELETE SET NULL,
                 deck_name TEXT REFERENCES decks(name) ON UPDATE CASCADE ON DELETE SET NULL,
                 tags  TEXT,
                 repetitions INTEGER NOT NULL DEFAULT 0,
@@ -89,7 +103,9 @@ class DatabaseManager:
                 """
                 CREATE TABLE cards (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    public_id TEXT NOT NULL UNIQUE,
                     content TEXT NOT NULL,
+                    deck_id TEXT REFERENCES decks(public_id) ON UPDATE CASCADE ON DELETE SET NULL,
                     deck_name TEXT REFERENCES decks(name) ON UPDATE CASCADE ON DELETE SET NULL,
                     tags  TEXT,
                     repetitions INTEGER NOT NULL DEFAULT 0,
@@ -115,14 +131,16 @@ class DatabaseManager:
                 conn_obj.execute(
                     """
                     INSERT INTO cards(
-                        id, content, deck_name, tags, repetitions, interval, efactor,
+                        id, public_id, content, deck_id, deck_name, tags, repetitions, interval, efactor,
                         due, last_reviewed, lapses, is_learning, learn_step_idx, due_ts
                     )
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         row["id"],
+                        str(uuid4()),
                         json.dumps(content_payload),
+                        None,
                         row["deck_name"],
                         row["tags"],
                         row["repetitions"],
@@ -170,6 +188,83 @@ class DatabaseManager:
         conn_obj.execute("CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due);")
         conn_obj.execute("CREATE INDEX IF NOT EXISTS idx_cards_deck ON cards(deck_name);")
         conn_obj.execute("CREATE INDEX IF NOT EXISTS idx_cards_due_ts ON cards(due_ts);")
+        conn_obj.execute("CREATE INDEX IF NOT EXISTS idx_cards_deck_id ON cards(deck_id);")
+        conn_obj.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_public_id ON cards(public_id);")
+        conn_obj.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_decks_public_id ON decks(public_id);"
+        )
+
+    @staticmethod
+    def _migrate_decks_add_ids(conn_obj: sqlite3.Connection) -> None:
+        """Upgrade legacy deck tables that only stored the name."""
+        conn_obj.execute("ALTER TABLE decks RENAME TO decks_legacy")
+        conn_obj.execute(
+            """
+            CREATE TABLE decks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL UNIQUE
+            );
+            """
+        )
+        rows = conn_obj.execute("SELECT name FROM decks_legacy").fetchall()
+        for row in rows:
+            conn_obj.execute(
+                "INSERT INTO decks(public_id, name) VALUES(?, ?)",
+                (str(uuid4()), row["name"]),
+            )
+        conn_obj.execute("DROP TABLE decks_legacy")
+
+    @staticmethod
+    def _add_public_ids(conn_obj: sqlite3.Connection) -> None:
+        """Populate public UUIDs for legacy tables already migrated to include id."""
+        conn_obj.execute("ALTER TABLE decks ADD COLUMN public_id TEXT")
+        rows = conn_obj.execute("SELECT id FROM decks WHERE public_id IS NULL").fetchall()
+        for row in rows:
+            conn_obj.execute(
+                "UPDATE decks SET public_id=? WHERE id=?",
+                (str(uuid4()), row["id"]),
+            )
+        conn_obj.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_decks_public_id ON decks(public_id);"
+        )
+
+    @staticmethod
+    def _ensure_card_public_id_column(conn_obj: sqlite3.Connection) -> None:
+        """Ensure cards carry a public UUID identifier."""
+        if not DatabaseManager._column_exists(conn_obj, "cards", "public_id"):
+            conn_obj.execute("ALTER TABLE cards ADD COLUMN public_id TEXT")
+        rows = conn_obj.execute(
+            "SELECT id FROM cards WHERE public_id IS NULL OR public_id = ''"
+        ).fetchall()
+        for row in rows:
+            conn_obj.execute(
+                "UPDATE cards SET public_id=? WHERE id=?",
+                (str(uuid4()), row["id"]),
+            )
+        conn_obj.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_public_id ON cards(public_id);"
+        )
+
+    @staticmethod
+    def _ensure_card_deck_id_column(conn_obj: sqlite3.Connection) -> None:
+        """Ensure cards store deck references using the deck public UUID."""
+        if not DatabaseManager._column_exists(conn_obj, "cards", "deck_id"):
+            conn_obj.execute("ALTER TABLE cards ADD COLUMN deck_id TEXT")
+        rows = conn_obj.execute(
+            "SELECT id, deck_name FROM cards WHERE deck_id IS NULL AND deck_name IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            deck = conn_obj.execute(
+                "SELECT public_id FROM decks WHERE name=?",
+                (row["deck_name"],),
+            ).fetchone()
+            if deck:
+                conn_obj.execute(
+                    "UPDATE cards SET deck_id=? WHERE id=?",
+                    (deck["public_id"], row["id"]),
+                )
+        conn_obj.execute("CREATE INDEX IF NOT EXISTS idx_cards_deck_id ON cards(deck_id);")
 
 
 db_manager = DatabaseManager(DB_PATH)
