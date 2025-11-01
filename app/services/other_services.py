@@ -53,8 +53,14 @@ class DeckService:
         if self._repo.exists(name):
             raise HTTPException(status_code=409, detail="Deck already exists")
         public_id = str(uuid4())
-        self._repo.insert(name, public_id)
-        return DeckOut(public_id=public_id, name=name, due_cards=0, total_cards=0)
+        deck_row = self._repo.insert(name=name, deck_type=payload.type, public_id=public_id)
+        return DeckOut(
+            public_id=deck_row["public_id"],
+            name=deck_row["name"],
+            type=deck_row["type"],
+            due_cards=0,
+            total_cards=0,
+        )
 
     def list(self) -> List[DeckOut]:
         """Return all decks ordered alphabetically along with card statistics."""
@@ -81,7 +87,13 @@ class DeckService:
         deck_row = self._repo.find_by_public_id(public_id)
         if not deck_row:
             raise HTTPException(status_code=404, detail="Deck not found after rename")
-        return DeckOut(public_id=deck_row["public_id"], name=deck_row["name"], due_cards=0, total_cards=0)
+        return DeckOut(
+            public_id=deck_row["public_id"],
+            name=deck_row["name"],
+            type=deck_row["type"],
+            due_cards=0,
+            total_cards=0,
+        )
 
     @staticmethod
     def _row_to_deck_out(row: Mapping[str, Any]) -> DeckOut:
@@ -89,6 +101,7 @@ class DeckService:
         return DeckOut(
             public_id=row["public_id"],
             name=row["name"],
+            type=row["type"],
             due_cards=int(row["due_cards"] or 0),
             total_cards=int(row["total_cards"] or 0),
         )
