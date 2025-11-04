@@ -41,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import config, time_utils
 from app.db import db_manager
-from app.services.evaluate import evaluate_pronunciation
+from app.services.evaluate import evaluate_pronunciation, format_eval_response
 from app.repositories import CardRepository, DeckRepository
 from app.schemas import (
     CardCreate,
@@ -323,28 +323,7 @@ def evaluate(
         except Exception:
             pass
 
-    return _format_evaluation_response(raw_results, req.phoneme_fmt)
-
-def _format_evaluation_response(results: Dict[str, Any], phoneme_fmt: str) -> EvalResponse:
-    """Adapt the internal evaluation payload to the public API schema."""
-    words: List[Dict[str, Any]] = list(results.get("words") or [])
-    intelligibility_score = float(results.get("intelligibility", 0.0))
-    word_accuracy_rate = float(results.get("word_accuracy_rate", 0.0))
-    fluency_level = results.get("fluency_level")
-
-    return EvalResponse(
-        intelligibility={
-            "score": intelligibility_score,
-            "word_accuracy_rate": word_accuracy_rate,
-        },
-        phonetic_analysis={
-            "fluency_level": fluency_level,
-            "words": words,
-        },
-        meta={
-            "phoneme_fmt": phoneme_fmt,
-        },
-    )
+    return format_eval_response(raw_results, req.phoneme_fmt)
 
 
 # ------------------------

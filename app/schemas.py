@@ -7,13 +7,7 @@ from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field, field_validator
 
 # from app.evaluate import DEFAULT_MODEL
-
-
-def _normalize_deck_type(deck_type: str) -> str:
-    normalized = (deck_type or "").strip().lower()
-    if normalized == "speach":
-        return "speech"
-    return normalized
+from app.utils.decks import normalize_deck_type
 
 
 class DeckCreate(BaseModel):
@@ -25,7 +19,7 @@ class DeckCreate(BaseModel):
     @field_validator("type", mode="before")
     @classmethod
     def _validate_type(cls, value: str) -> str:
-        normalized = _normalize_deck_type(value)
+        normalized = normalize_deck_type(value)
         if normalized not in {"speech", "shadowing"}:
             raise ValueError("type must be 'speech' or 'shadowing'")
         return normalized

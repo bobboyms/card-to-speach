@@ -7,6 +7,7 @@ import base64
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 from app.models.word_segment import WordSegment
+from app.schemas import EvalResponse
 
 if TYPE_CHECKING:  # pragma: no cover - hints only
     from app.services.alignment_service import ForcedAlignmentService
@@ -199,6 +200,28 @@ def evaluate_pronunciation(
             _DEFAULT_SERVICE = PronunciationEvaluationService()
         evaluator = _DEFAULT_SERVICE
     return evaluator.evaluate(audio_path, target_text, phoneme_fmt)
+
+
+def format_eval_response(results: Dict[str, Any], phoneme_fmt: str) -> EvalResponse:
+    """Build the EvalResponse payload expected by the public API."""
+    words: List[Dict[str, Any]] = list(results.get("words") or [])
+    intelligibility_score = float(results.get("intelligibility", 0.0))
+    word_accuracy_rate = float(results.get("word_accuracy_rate", 0.0))
+    fluency_level = results.get("fluency_level")
+
+    return EvalResponse(
+        intelligibility={
+            "score": intelligibility_score,
+            "word_accuracy_rate": word_accuracy_rate,
+        },
+        phonetic_analysis={
+            "fluency_level": fluency_level,
+            "words": words,
+        },
+        meta={
+            "phoneme_fmt": phoneme_fmt,
+        },
+    )
 
 
 def _create_audio_service() -> Tuple["AudioService", Tuple[type[BaseException], ...]]:

@@ -22,6 +22,7 @@ from app.schemas import (
     CardsPage,
     ReviewOut,
 )
+from app.utils.decks import normalize_deck_type
 
 BUTTON_TO_GRADE = {"again": 0, "hard": 3, "good": 4, "easy": 5}
 
@@ -54,16 +55,7 @@ class DeckService:
             raise HTTPException(status_code=409, detail="Deck already exists")
         public_id = str(uuid4())
         deck_row = self._repo.insert(name=name, deck_type=payload.type, public_id=public_id)
-        deck_type = deck_row["type"]
-        if deck_type == "speach":
-            deck_type = "speech"
-        return DeckOut(
-            public_id=deck_row["public_id"],
-            name=deck_row["name"],
-            type=deck_type,
-            due_cards=0,
-            total_cards=0,
-        )
+        return self._row_to_deck_out(deck_row)
 
     def list(self) -> List[DeckOut]:
         """Return all decks ordered alphabetically along with card statistics."""
@@ -90,29 +82,34 @@ class DeckService:
         deck_row = self._repo.find_by_public_id(public_id)
         if not deck_row:
             raise HTTPException(status_code=404, detail="Deck not found after rename")
-        deck_type = deck_row["type"]
-        if deck_type == "speach":
-            deck_type = "speech"
-        return DeckOut(
-            public_id=deck_row["public_id"],
-            name=deck_row["name"],
-            type=deck_type,
-            due_cards=0,
-            total_cards=0,
-        )
+        return self._row_to_deck_out(deck_row)
 
     @staticmethod
-    def _row_to_deck_out(row: Mapping[str, Any]) -> DeckOut:
+    def _row_to_deck_out(
+        row: Mapping[str, Any],
+        *,
+        default_due_cards: int = 0,
+        default_total_cards: int = 0,
+    ) -> DeckOut:
         """Build a DeckOut instance from a repository row."""
-        deck_type = row["type"]
-        if deck_type == "speach":
+        if hasattr(row, "keys"):
+            row_dict = {key: row[key] for key in row.keys()}
+        else:
+            row_dict = dict(row)
+
+        deck_type = normalize_deck_type(row_dict.get("type", ""))
+        if deck_type not in {"speech", "shadowing"}:
             deck_type = "speech"
+
+        due_cards_raw = row_dict.get("due_cards", default_due_cards)
+        total_cards_raw = row_dict.get("total_cards", default_total_cards)
+
         return DeckOut(
-            public_id=row["public_id"],
-            name=row["name"],
+            public_id=row_dict["public_id"],
+            name=row_dict["name"],
             type=deck_type,
-            due_cards=int(row["due_cards"] or 0),
-            total_cards=int(row["total_cards"] or 0),
+            due_cards=int(due_cards_raw or 0),
+            total_cards=int(total_cards_raw or 0),
         )
 
     def delete(self, public_id: str) -> None:
@@ -136,11 +133,37 @@ class CardService:
         self._deck_service = deck_service
         self._utc_now = utc_now
 
+    @staticmethod
+    def _require_card_public_id(
+        value: str,
+        *,
+        status_code: int = 404,
+        detail: str = "Card not found",
+    ) -> str:
+        public_id = (value or "").strip()
+        if not public_id:
+            raise HTTPException(status_code=status_code, detail=detail)
+        return public_id
+
+    @staticmethod
+    def _require_deck_id(
+        value: Optional[str],
+        *,
+        status_code: int,
+        detail: str,
+    ) -> str:
+        deck_id = (value or "").strip()
+        if not deck_id:
+            raise HTTPException(status_code=status_code, detail=detail)
+        return deck_id
+
     def create(self, payload: CardCreate) -> CardOut:
         """Insert a new card in learning mode and return its API model."""
-        deck_id = payload.deck_id.strip()
-        if not deck_id:
-            raise HTTPException(status_code=400, detail="Deck public id cannot be empty")
+        deck_id = self._require_deck_id(
+            payload.deck_id,
+            status_code=400,
+            detail="Deck public id cannot be empty",
+        )
         self._deck_service.get_by_public_id(deck_id)
         now = self._utc_now()
         tags_csv = self._serialize_tags(payload.tags)
@@ -165,18 +188,22 @@ class CardService:
 
     def list_by_deck(self, deck: str, limit: int) -> List[CardOut]:
         """Return cards for a deck ordered by due timestamp."""
-        deck_id = deck.strip()
-        if not deck_id:
-            raise HTTPException(status_code=404, detail="Deck not found")
+        deck_id = self._require_deck_id(
+            deck,
+            status_code=404,
+            detail="Deck not found",
+        )
         self._deck_service.get_by_public_id(deck_id)
         rows = self._repo.list_by_deck(deck_id, limit)
         return [self._row_to_cardout(row) for row in rows]
 
     def list_due(self, deck: str, limit: int, offset: int) -> CardsPage:
         """Return paginated due cards for a deck."""
-        deck_id = deck.strip()
-        if not deck_id:
-            raise HTTPException(status_code=404, detail="Deck not found")
+        deck_id = self._require_deck_id(
+            deck,
+            status_code=404,
+            detail="Deck not found",
+        )
         self._deck_service.get_by_public_id(deck_id)
         now_iso = self._utc_now().isoformat(timespec="seconds")
         total, rows = self._repo.list_due(deck_id, now_iso, limit, offset)
@@ -186,9 +213,7 @@ class CardService:
 
     def get(self, card_public_id: str) -> CardOut:
         """Fetch a card by public ID and return its API model."""
-        public_id = card_public_id.strip()
-        if not public_id:
-            raise HTTPException(status_code=404, detail="Card not found")
+        public_id = self._require_card_public_id(card_public_id)
         row = self._repo.fetch_by_public_id(public_id)
         if not row:
             raise HTTPException(status_code=404, detail="Card not found")
@@ -196,9 +221,7 @@ class CardService:
 
     def update(self, card_public_id: str, payload: CardUpdate) -> CardOut:
         """Update card content, deck, or tags and return the updated model."""
-        public_id = card_public_id.strip()
-        if not public_id:
-            raise HTTPException(status_code=404, detail="Card not found")
+        public_id = self._require_card_public_id(card_public_id)
         row = self._repo.fetch_by_public_id(public_id)
         if not row:
             raise HTTPException(status_code=404, detail="Card not found")
@@ -208,9 +231,11 @@ class CardService:
             new_content = row["content"]
 
         if payload.deck_id is not None:
-            deck_id = payload.deck_id.strip()
-            if not deck_id:
-                raise HTTPException(status_code=400, detail="Deck public id cannot be empty")
+            deck_id = self._require_deck_id(
+                payload.deck_id,
+                status_code=400,
+                detail="Deck public id cannot be empty",
+            )
             self._deck_service.get_by_public_id(deck_id)
             new_deck_id = deck_id
         else:
@@ -225,18 +250,14 @@ class CardService:
 
     def delete(self, card_public_id: str) -> None:
         """Delete a card by public ID; raise 404 when not found."""
-        public_id = card_public_id.strip()
-        if not public_id:
-            raise HTTPException(status_code=404, detail="Card not found")
+        public_id = self._require_card_public_id(card_public_id)
         deleted = self._repo.delete_by_public_id(public_id)
         if deleted == 0:
             raise HTTPException(status_code=404, detail="Card not found")
 
     def fetch_row(self, card_public_id: str) -> Dict[str, Any]:
         """Return the raw database row for a card (used by review logic)."""
-        public_id = card_public_id.strip()
-        if not public_id:
-            raise HTTPException(status_code=404, detail="Card not found")
+        public_id = self._require_card_public_id(card_public_id)
         row = self._repo.fetch_by_public_id(public_id)
         if not row:
             raise HTTPException(status_code=404, detail="Card not found")
