@@ -1,23 +1,27 @@
 # tests/test_1_decks_crud_integrity.py
 def test_create_deck_ok_and_duplicate(app_client):
     c = app_client
-    r1 = c.post("/decks", json={"name": "geo"})
+    r1 = c.post("/decks", json={"name": "geo", "type": "speach"})
     assert r1.status_code == 201
-    r2 = c.post("/decks", json={"name": "geo"})
+    created = r1.json()
+    assert created["type"] == "speach"
+    r2 = c.post("/decks", json={"name": "geo", "type": "speach"})
     assert r2.status_code == 409
 
 def test_create_deck_empty_name(app_client):
     c = app_client
-    r = c.post("/decks", json={"name": ""})
+    r = c.post("/decks", json={"name": "", "type": "speach"})
     assert r.status_code in (400, 422)
 
 def test_rename_deck_propagates_to_cards(app_client):
     c = app_client
-    deck_geo = c.post("/decks", json={"name": "geo"}).json()
-    c.post("/decks", json={"name": "hist"})
+    deck_geo = c.post("/decks", json={"name": "geo", "type": "speach"}).json()
+    c.post("/decks", json={"name": "hist", "type": "shadowing"})
     card = c.post("/cards", json={"content":{"front":"Q","back":"A"},"deck_id":deck_geo["public_id"]}).json()
     r = c.patch(f"/decks/{deck_geo['public_id']}", json={"new_name": "geografia"})
     assert r.status_code == 200
+    renamed = r.json()
+    assert renamed["type"] == "speach"
     rlist = c.get("/cards", params={"deck_id": deck_geo["public_id"]})
     assert rlist.status_code == 200
     cards = rlist.json()
@@ -26,7 +30,7 @@ def test_rename_deck_propagates_to_cards(app_client):
 
 def test_delete_deck_sets_cards_null(app_client):
     c = app_client
-    deck_geo = c.post("/decks", json={"name":"geo"}).json()
+    deck_geo = c.post("/decks", json={"name":"geo", "type": "speach"}).json()
     card = c.post("/cards", json={"content":{"front":"Q","back":"A"},"deck_id":deck_geo["public_id"]}).json()
     r = c.delete(f"/decks/{deck_geo['public_id']}")
     assert r.status_code == 204

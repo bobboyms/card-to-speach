@@ -10,9 +10,9 @@ from uuid import uuid4
 from fastapi import HTTPException
 from supermemo2 import first_review, review
 
-from .repositories import DeckRepository, CardRepository
-from .time_utils import utc_now
-from .schemas import (
+from app.repositories import DeckRepository, CardRepository
+from app.time_utils import utc_now
+from app.schemas import (
     DeckCreate,
     DeckRename,
     DeckOut,

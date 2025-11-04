@@ -23,44 +23,40 @@ Teste rápido:
       -d '{"target_text":"she looks happy","audio_b64":"<BASE64>"}'
 
 Observações:
+- Suporta **audio/webm (Opus)**: o backend converte automaticamente para WAV 16 kHz mono via `ffmpeg` se necessário.
+- O Whisper (MLX) roda localmente; se não houver suporte MLX, a API retornará erro informando.
+- O áudio deve ser mono (ou será convertido) e taxa de amostragem será tratada pelo backend do Whisper quando possível.
+
 - O Whisper (MLX) roda localmente; se não houver suporte MLX, a API retornará erro informando.
 - O áudio deve ser mono (ou será convertido) e taxa de amostragem será tratada pelo backend do Whisper quando possível.
 """
 
-import os
-import io
 import re
-import json
-import time
 import base64
-import tempfile
-from dataclasses import dataclass
+from threading import Lock
 from typing import List, Dict, Optional
 
 import numpy as np
 import jiwer
-import soundfile as sf
 from difflib import SequenceMatcher
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
 from g2p_en import G2p
 from phonecodes import phonecodes as pc
 
-# ===== Whisper (MLX) =====
-try:
-    import mlx_whisper
-    HAS_MLX = True
-except Exception:
-    mlx_whisper = None
-    HAS_MLX = False
-
-# ========================= Configs =========================
-DEFAULT_MODEL = "mlx-community/whisper-small-mlx"
-SAMPLE_RATE_TARGET = 16000  # ASR alvo
-CHANNELS = 1
+from app.models.word_segment import WordSegment
+from app.services.alignment_service import ForcedAlignmentService
+from app.services.audio_service import AudioService, AudioServiceError
+from app.services.transcription_service import TranscriptionService
 
 g2p = G2p()
 MORPH_SUFFIXES = ("ed", "ing", "s", "es")
+
+
+# ========================= Serviços em cache =========================
+_KNOWN_WHISPER_MODELS = {"tiny", "base", "small", "medium", "large"}
+_AUDIO_SERVICE = AudioService(target_sr=16000, mono=True, apply_fade_ms=3)
+_ALIGNER = ForcedAlignmentService(min_word_len_s=0.015)
+_TRANSCRIBER_SERVICE = TranscriptionService(whisper_model="small")
+_TRANSCRIBER_LOCK = Lock()
 
 # ========================= Normalização & Tokenização =========================
 def normalize_text(s: str) -> str:
@@ -164,78 +160,32 @@ def is_minor_morph_variation(target_word: str, hyp_word: str) -> bool:
         return True
     return False
 
-# ========================= Utilitários de áudio/base64 =========================
-def guess_audio_extension(header: bytes) -> str:
-    if header.startswith(b"RIFF"):  # WAV
-        return ".wav"
-    if header.startswith(b"ID3") or header[:2] == b"\xff\xfb":  # MP3
-        return ".mp3"
-    if header.startswith(b"fLaC"):  # FLAC
-        return ".flac"
-    if header.startswith(b"OggS"):  # OGG
-        return ".ogg"
-    if header[4:8] == b"ftyp":  # MP4/M4A container
-        return ".m4a"
-    return ".wav"  # padrão seguro
-
-
-def b64_to_temp_audio_file(b64_str: str) -> str:
-    try:
-        raw = base64.b64decode(b64_str, validate=True)
-    except Exception:
-        # pode ser data URL; tentar extrair após vírgula
-        try:
-            b64_part = b64_str.split(",", 1)[-1]
-            raw = base64.b64decode(b64_part, validate=True)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Base64 inválido: {e}")
-    ext = guess_audio_extension(raw[:16])
-    fd, path = tempfile.mkstemp(prefix="pron_", suffix=ext)
-    with os.fdopen(fd, "wb") as f:
-        f.write(raw)
-    return path
-
 
 # ========================= Núcleo de avaliação =========================
-def evaluate_pronunciation(audio_path: str, target_text: str, phoneme_fmt: str = "ipa",
-                           model_repo: str = DEFAULT_MODEL) -> Dict:
-    if not HAS_MLX:
-        raise RuntimeError("mlx-whisper não está disponível neste ambiente. Instale `mlx` e `mlx-whisper` em Apple Silicon, ou adapte para outro ASR.")
+def evaluate_pronunciation(
+        audio_path: str,
+        target_text: str,
+        phoneme_fmt: str = "ipa",
+        *,
+        audio_service: AudioService | None = None,
+        aligner: ForcedAlignmentService | None = None,
+        transcriber: TranscriptionService | None = None,
+) -> Dict:
+    audio = audio_service or _AUDIO_SERVICE
+    aligner = aligner or _ALIGNER
+    transcriber = transcriber or _TRANSCRIBER_SERVICE
 
-    result = mlx_whisper.transcribe(
-        audio_path,
-        path_or_hf_repo=model_repo,
-        word_timestamps=True,
-    )
-    hypothesis_text = (result.get("text") or "").strip()
+    wav_path = audio.convert_to_wav(audio_path)
+    hypothesis_text, word_scores, word_probs, avg_logprob = transcriber.transcribe_text(wav_path)
 
-    # word-level
-    word_scores = []
-    word_probs = []
-    if "segments" in result:
-        for seg in result["segments"]:
-            for w in seg.get("words") or []:
-                item = {
-                    "word": (w.get("word") or "").strip(),
-                    "start": float(w.get("start", 0.0)),
-                    "end": float(w.get("end", 0.0)),
-                    "confidence": w.get("probability", None),
-                }
-                word_scores.append(item)
-                if item["confidence"] is not None:
-                    word_probs.append(item["confidence"])
-
+    # ===== novo: normalização + flag global de mismatch =====
     ref_norm = normalize_text(target_text)
     hyp_norm = normalize_text(hypothesis_text)
+    target_text_mismatch = (ref_norm != hyp_norm)
+    # ========================================================
+
     wer = jiwer.wer(ref_norm, hyp_norm)
     wer = min(1.0, max(0.0, float(wer)))
-
-    seg_avg_logprobs = []
-    if "segments" in result:
-        for seg in result["segments"]:
-            if "avg_logprob" in seg and seg["avg_logprob"] is not None:
-                seg_avg_logprobs.append(float(seg["avg_logprob"]))
-    avg_logprob = float(np.mean(seg_avg_logprobs)) if seg_avg_logprobs else None
 
     confidence = combine_confidence(wer, avg_logprob=avg_logprob, word_probs=word_probs or None)
     intelligibility = (wer <= 0.30)
@@ -253,16 +203,58 @@ def evaluate_pronunciation(audio_path: str, target_text: str, phoneme_fmt: str =
     hyp_tokens = tokenize_words(hypothesis_text)
     opcodes = align_token_sequences(target_tokens, hyp_tokens)
 
-    target_phonemes = {w: get_phonemes_word(w, fmt=phoneme_fmt) for w in target_tokens}
+    # ===== novo: flags por palavra do target =====
+    # True = pronunciada corretamente (alinhada como 'equal'); False = trocada/omitida
+    correct_flags = [False] * len(target_tokens)
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            for k in range(i1, i2):
+                correct_flags[k] = True
+        elif tag in ("replace", "delete"):
+            for k in range(i1, i2):
+                correct_flags[k] = False
+        # 'insert' não afeta palavras do target
+    # =============================================
+    # 3) alinhar (CTC)
+    words: list[WordSegment] = aligner.align(wav_path, hypothesis_text)
+
+    phrases_audio_b64: List[Optional[str]] = []
+    for w in words:
+        try:
+            audio_bytes = audio.cut_precise_to_bytes(
+                wav_path,
+                w.start,
+                w.end,
+                fmt="mp3",
+            )
+            if audio_bytes:
+                phrases_audio_b64.append(base64.b64encode(audio_bytes).decode("ascii"))
+            else:
+                phrases_audio_b64.append(None)
+        except AudioServiceError:
+            phrases_audio_b64.append(None)
+
+    # target_phonemes agora é word -> {"phonemes": "...", "is_correct": bool}
+    target_phonemes = {}
+    for idx, w in enumerate(target_tokens):
+        target_phonemes[w] = {
+            "phonemes": get_phonemes_word(w, fmt=phoneme_fmt),
+            "is_correct": bool(correct_flags[idx]),
+            "audio_b64": phrases_audio_b64[idx] if idx < len(phrases_audio_b64) else None,
+        }
+
+    # hipótese continua como mapa simples (por palavra)
     hypothesis_phonemes = {w: get_phonemes_word(w, fmt=phoneme_fmt) for w in hyp_tokens}
 
     results["phonetic_analysis"] = {
         "format": phoneme_fmt,
-        "target_phonemes": target_phonemes,
+        "target_phonemes": target_phonemes,              # <-- agora com is_correct por palavra
         "hypothesis_phonemes": hypothesis_phonemes,
-        "word_scores": word_scores
+        "word_scores": word_scores,
+        "target_text_mismatch": bool(target_text_mismatch)  # <-- flag global solicitada antes
     }
 
+    # feedback fonético (inalterado)
     phone_feedback = []
     for tag, i1, i2, j1, j2 in opcodes:
         if tag == "replace":
@@ -295,4 +287,3 @@ def evaluate_pronunciation(audio_path: str, target_text: str, phoneme_fmt: str =
                 })
     results["phone_feedback"] = phone_feedback
     return results
-

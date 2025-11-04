@@ -1,0 +1,343 @@
+{
+  "sentence_metrics": {
+    "aer": 0.0,
+    "aer_breakdown": {
+      "by_class": {
+        "cons": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 13.5
+        },
+        "vowel": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 3.7
+        }
+      },
+      "by_feature": {
+        "asp": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 1.5
+        },
+        "b": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 1.0
+        },
+        "h": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 1.0
+        },
+        "lat": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 1.5
+        },
+        "man": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 3.0
+        },
+        "pla": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 3.0
+        },
+        "rh": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 0.5
+        },
+        "round": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 1.2
+        },
+        "voi": {
+          "aer": 0.0,
+          "mism": 0.0,
+          "total": 4.5
+        }
+      }
+    },
+    "aer_by_feature": {
+      "asp": {
+        "aer": 0.0,
+        "mism": 0.0,
+        "total": 1.5
+      },
+      "b": {
+        "aer": 0.0,
+        "mism": 0.0,
+        "total": 1.0
+      },
+      "h": {
+        "aer": 0.0,
+        "mism": 0.0,
+        "total": 1.0
+      },
+      "lat": {
+        "aer": 0.0,
+        "mism": 0.0,
+        "total": 1.5
+      },
+      "man": {
+        "aer": 0.0,
+        "mism": 0.0,
+        "total": 3.0
+      },
+      "pla": {
+        "aer": 0.0,
+        "mism": 0.0,
+        "total": 3.0
+      },
+      "rh": {
+        "aer": 0.0,
+        "mism": 0.0,
+        "total": 0.5
+      },
+      "round": {
+        "aer": 0.0,
+        "mism": 0.0,
+        "total": 1.2
+      },
+      "voi": {
+        "aer": 0.0,
+        "mism": 0.0,
+        "total": 4.5
+      }
+    },
+    "aer_overall": 0.0,
+    "counts": {
+      "D": 0,
+      "I": 0,
+      "S": 0,
+      "n_hyp_phones": 4,
+      "n_ref_phones": 4,
+      "n_words": 1
+    },
+    "fluency": {
+      "duration_s": 0.5,
+      "level": "medium",
+      "pause_ratio": 0.0,
+      "phones_per_sec": 8.0,
+      "words_per_sec": 2.0
+    },
+    "fluency_details": {
+      "articulation_rate_syll_per_sec": 2.0,
+      "fillers": {
+        "count": 0,
+        "examples": []
+      },
+      "mean_pause_ms": 0.0,
+      "mlr_syllables": 1.0,
+      "num_pauses_250ms": 0,
+      "std_inter_pause_ms": 0.0,
+      "std_speaking_rate_syll_per_sec": 0.0,
+      "wpm": 120.0
+    },
+    "intelligibility": 1.0,
+    "per_by_class": {
+      "cons": {
+        "D": 0,
+        "I": 0,
+        "N_ref": 3,
+        "S": 0,
+        "per": 0.0
+      },
+      "vowel": {
+        "D": 0,
+        "I": 0,
+        "N_ref": 1,
+        "S": 0,
+        "per": 0.0
+      }
+    },
+    "per_by_position": {
+      "final": {
+        "D": 0,
+        "I": 0,
+        "N_ref": 1,
+        "S": 0,
+        "per": 0.0
+      },
+      "initial": {
+        "D": 0,
+        "I": 0,
+        "N_ref": 1,
+        "S": 0,
+        "per": 0.0
+      },
+      "medial": {
+        "D": 0,
+        "I": 0,
+        "N_ref": 2,
+        "S": 0,
+        "per": 0.0
+      }
+    },
+    "per_components": {
+      "D": 0,
+      "I": 0,
+      "N_ref": 4,
+      "S": 0
+    },
+    "per_confidence_interval": {
+      "high": 0.0,
+      "level": 0.95,
+      "low": 0.0,
+      "method": "percentile",
+      "n_boot": 1000
+    },
+    "per_consonants": 0.0,
+    "per_vowels": 0.0,
+    "war_by_length": {
+      "exact": {
+        "4": 1.0
+      },
+      "hybrid": {
+        "4": 1.0
+      },
+      "tolerant": {
+        "4": 1.0
+      }
+    },
+    "war_variants": {
+      "exact": 1.0,
+      "hybrid": {
+        "alpha": 0.8,
+        "beta": 0.0,
+        "value": 1.0
+      },
+      "tolerant": {
+        "alpha": 0.8,
+        "value": 1.0
+      }
+    },
+    "war_weighted": {
+      "by_duration": 1.0,
+      "by_syllables": 1.0
+    },
+    "word_accuracy_rate": 1.0,
+    "words": [
+      {
+        "confusion": [
+          {
+            "hyp": "t",
+            "op": "match",
+            "ref": "t"
+          },
+          {
+            "hyp": "\u025b",
+            "op": "match",
+            "ref": "\u025b"
+          },
+          {
+            "hyp": "s",
+            "op": "match",
+            "ref": "s"
+          },
+          {
+            "hyp": "t",
+            "op": "match",
+            "ref": "t"
+          }
+        ],
+        "duration_frames": 8,
+        "length_phones": 4,
+        "per_ops": [
+          "match",
+          "match",
+          "match",
+          "match"
+        ],
+        "phones": [
+          {
+            "end_s": 0.07142857142857142,
+            "gop": 2.0126757621765137,
+            "pass": true,
+            "phone": "t",
+            "start_s": 0.0,
+            "t1": 0,
+            "t2": 1,
+            "threshold": 0.0
+          },
+          {
+            "end_s": 0.21428571428571427,
+            "gop": 1.3195286989212036,
+            "pass": true,
+            "phone": "\u025b",
+            "start_s": 0.14285714285714285,
+            "t1": 2,
+            "t2": 3,
+            "threshold": 0.0
+          },
+          {
+            "end_s": 0.35714285714285715,
+            "gop": 1.3195286989212036,
+            "pass": true,
+            "phone": "s",
+            "start_s": 0.2857142857142857,
+            "t1": 4,
+            "t2": 5,
+            "threshold": 0.0
+          },
+          {
+            "end_s": 0.5,
+            "gop": 0.0,
+            "pass": true,
+            "phone": "t",
+            "start_s": 0.42857142857142855,
+            "t1": 6,
+            "t2": 7,
+            "threshold": 0.0
+          }
+        ],
+        "phones_gop": [
+          {
+            "gop": 2.0126757621765137,
+            "pass": true,
+            "phone": "t",
+            "threshold": 0.0
+          },
+          {
+            "gop": 1.3195286989212036,
+            "pass": true,
+            "phone": "\u025b",
+            "threshold": 0.0
+          },
+          {
+            "gop": 1.3195286989212036,
+            "pass": true,
+            "phone": "s",
+            "threshold": 0.0
+          },
+          {
+            "gop": 0.0,
+            "pass": true,
+            "phone": "t",
+            "threshold": 0.0
+          }
+        ],
+        "produced_phone": [
+          "t",
+          "\u025b",
+          "s",
+          "t"
+        ],
+        "syllables": 1,
+        "target_phones": [
+          "t",
+          "\u025b",
+          "s",
+          "t"
+        ],
+        "target_word": "test",
+        "word_score_gop": 1.0,
+        "word_score_per": 1.0
+      }
+    ]
+  }
+}

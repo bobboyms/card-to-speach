@@ -6,9 +6,14 @@ from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+# from app.evaluate import DEFAULT_MODEL
+
 
 class DeckCreate(BaseModel):
     name: str = Field(..., min_length=1)
+    type: Literal["speach", "shadowing"] = Field(
+        ..., description="Deck modality defining the learning flow."
+    )
 
 
 class DeckRename(BaseModel):
@@ -18,6 +23,7 @@ class DeckRename(BaseModel):
 class DeckOut(BaseModel):
     public_id: str
     name: str
+    type: Literal["speach", "shadowing"]
     due_cards: int
     total_cards: int
 
@@ -93,3 +99,14 @@ class CardsPage(BaseModel):
     limit: int
     offset: int
     next_offset: Optional[int]
+
+class EvalRequest(BaseModel):
+    target_text: str = Field(..., description="Frase-alvo em inglês")
+    audio_b64: str = Field(..., description="Áudio codificado em base64 (pode ser data URL)")
+    phoneme_fmt: str = Field("ipa", description="Formato de fonemas: ipa|ascii|arpabet")
+    # model_repo: str = Field(DEFAULT_MODEL, description="Repositório/modelo mlX Whisper")
+
+class EvalResponse(BaseModel):
+    intelligibility: dict
+    phonetic_analysis: dict
+    meta: dict

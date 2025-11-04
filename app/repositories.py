@@ -20,7 +20,7 @@ class DeckRepository:
         return self.find_by_name(name) is not None
 
     def find_by_name(self, name: str, *, conn: Optional[sqlite3.Connection] = None) -> Optional[sqlite3.Row]:
-        query = "SELECT id, public_id, name FROM decks WHERE name=?"
+        query = "SELECT id, public_id, name, type FROM decks WHERE name=?"
         if conn is None:
             with self._db.connect() as connection:
                 return connection.execute(query, (name,)).fetchone()
@@ -29,25 +29,27 @@ class DeckRepository:
     def find_by_public_id(
         self, public_id: str, *, conn: Optional[sqlite3.Connection] = None
     ) -> Optional[sqlite3.Row]:
-        query = "SELECT id, public_id, name FROM decks WHERE public_id=?"
+        query = "SELECT id, public_id, name, type FROM decks WHERE public_id=?"
         if conn is None:
             with self._db.connect() as connection:
                 return connection.execute(query, (public_id,)).fetchone()
         return conn.execute(query, (public_id,)).fetchone()
 
-    def insert(self, name: str, public_id: str) -> sqlite3.Row:
+    def insert(self, *, name: str, deck_type: str, public_id: str) -> sqlite3.Row:
         with self._db.connect() as connection:
             cursor = connection.execute(
-                "INSERT INTO decks(public_id, name) VALUES(?, ?)", (public_id, name)
+                "INSERT INTO decks(public_id, name, type) VALUES(?, ?, ?)",
+                (public_id, name, deck_type),
             )
             return connection.execute(
-                "SELECT id, public_id, name FROM decks WHERE id=?", (cursor.lastrowid,)
+                "SELECT id, public_id, name, type FROM decks WHERE id=?",
+                (cursor.lastrowid,),
             ).fetchone()
 
     def list_all(self) -> List[sqlite3.Row]:
         with self._db.connect() as connection:
             return connection.execute(
-                "SELECT public_id, name FROM decks ORDER BY name"
+                "SELECT public_id, name, type FROM decks ORDER BY name"
             ).fetchall()
 
     def list_with_counts(self, now_iso: str) -> List[sqlite3.Row]:
@@ -56,6 +58,7 @@ class DeckRepository:
             SELECT
                 d.public_id AS public_id,
                 d.name AS name,
+                d.type AS type,
                 COUNT(c.id) AS total_cards,
                 COUNT(CASE WHEN c.due_ts IS NOT NULL AND c.due_ts <= :now THEN 1 END) AS due_cards
             FROM decks d

@@ -31,14 +31,16 @@ Endpoints (Reviews):
 """
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
-from typing import List
+from typing import Any, Dict, List
 
-from fastapi import Body, FastAPI, Query
+from fastapi import Body, FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import config, time_utils
 from app.db import db_manager
+from app.services.evaluate import evaluate_pronunciation
 from app.repositories import CardRepository, DeckRepository
 from app.schemas import (
     CardCreate,
@@ -50,9 +52,10 @@ from app.schemas import (
     DeckRename,
     ReviewButtonIn,
     ReviewIn,
-    ReviewOut,
+    ReviewOut, EvalResponse, EvalRequest,
 )
-from app.services import CardService, DeckService, ReviewService
+from app.services.other_services import DeckService, CardService, ReviewService
+from app.utils.b64 import b64_to_temp_audio_file
 
 # ---------------------------------
 # Configuration (database and learning policy)
@@ -138,7 +141,7 @@ app.add_middleware(
 # ------------------------
 @app.post("/decks", response_model=DeckOut, status_code=201)
 def create_deck(payload: DeckCreate):
-    """Create a new deck and return the resulting model."""
+    """Create a new deck with an explicit type ('speach' or 'shadowing')."""
     return deck_service.create(payload)
 
 
@@ -227,6 +230,53 @@ def review_next_due_grade(deck_id: str = Query(..., description="Deck public UUI
 def review_card_button(card_public_id: str, payload: ReviewButtonIn = Body(...)):
     """Review a specific card by mapping the button press to the corresponding SM-2 grade."""
     return review_service.review_card_button(card_public_id, payload.button)
+
+
+@app.post("/evaluate", response_model=EvalResponse)
+def evaluate(req: EvalRequest):
+    if req.phoneme_fmt not in {"ipa", "ascii", "arpabet"}:
+        raise HTTPException(status_code=400, detail="phoneme_fmt deve ser 'ipa', 'ascii' ou 'arpabet'")
+    # Decodificar base64 -> arquivo temporário
+    audio_path = b64_to_temp_audio_file(req.audio_b64)
+    try:
+        raw_results = evaluate_pronunciation(
+            audio_path=audio_path,
+            target_text=req.target_text,
+            phoneme_fmt=req.phoneme_fmt,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha na avaliação: {e}")
+    finally:
+        # limpe o temporário
+        try:
+            os.remove(audio_path)
+        except Exception:
+            pass
+
+    return _format_evaluation_response(raw_results, req.phoneme_fmt)
+
+def _format_evaluation_response(results: Dict[str, Any], phoneme_fmt: str) -> Dict[str, Any]:
+    """Adapt the internal evaluation payload to the public API schema."""
+    words: List[Dict[str, Any]] = list(results.get("words") or [])
+    intelligibility_score = float(results.get("intelligibility", 0.0))
+    word_accuracy_rate = float(results.get("word_accuracy_rate", 0.0))
+    fluency_level = results.get("fluency_level")
+
+    return {
+        "intelligibility": {
+            "score": intelligibility_score,
+            "word_accuracy_rate": word_accuracy_rate,
+        },
+        "phonetic_analysis": {
+            "fluency_level": fluency_level,
+            "words": words,
+        },
+        "meta": {
+            "phoneme_fmt": phoneme_fmt,
+        },
+    }
 
 
 # ------------------------

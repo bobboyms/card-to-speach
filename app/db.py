@@ -55,7 +55,8 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS decks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 public_id TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL UNIQUE
+                name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL DEFAULT 'speach'
             );
             """
         )
@@ -66,6 +67,7 @@ class DatabaseManager:
             has_public_id = DatabaseManager._column_exists(conn_obj, "decks", "public_id")
         if not has_public_id:
             DatabaseManager._add_public_ids(conn_obj)
+        DatabaseManager._ensure_deck_type_column(conn_obj)
 
     @staticmethod
     def _ensure_cards_table(conn_obj: sqlite3.Connection) -> None:
@@ -203,14 +205,15 @@ class DatabaseManager:
             CREATE TABLE decks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 public_id TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL UNIQUE
+                name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL DEFAULT 'speach'
             );
             """
         )
         rows = conn_obj.execute("SELECT name FROM decks_legacy").fetchall()
         for row in rows:
             conn_obj.execute(
-                "INSERT INTO decks(public_id, name) VALUES(?, ?)",
+                "INSERT INTO decks(public_id, name, type) VALUES(?, ?, 'speach')",
                 (str(uuid4()), row["name"]),
             )
         conn_obj.execute("DROP TABLE decks_legacy")
@@ -228,6 +231,14 @@ class DatabaseManager:
         conn_obj.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_decks_public_id ON decks(public_id);"
         )
+
+    @staticmethod
+    def _ensure_deck_type_column(conn_obj: sqlite3.Connection) -> None:
+        """Ensure decks table tracks the deck type."""
+        if not DatabaseManager._column_exists(conn_obj, "decks", "type"):
+            conn_obj.execute(
+                "ALTER TABLE decks ADD COLUMN type TEXT NOT NULL DEFAULT 'speach'"
+            )
 
     @staticmethod
     def _ensure_card_public_id_column(conn_obj: sqlite3.Connection) -> None:
