@@ -56,7 +56,7 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 public_id TEXT NOT NULL UNIQUE,
                 name TEXT NOT NULL UNIQUE,
-                type TEXT NOT NULL DEFAULT 'speach'
+                type TEXT NOT NULL DEFAULT 'speech'
             );
             """
         )
@@ -206,14 +206,14 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 public_id TEXT NOT NULL UNIQUE,
                 name TEXT NOT NULL UNIQUE,
-                type TEXT NOT NULL DEFAULT 'speach'
+                type TEXT NOT NULL DEFAULT 'speech'
             );
             """
         )
         rows = conn_obj.execute("SELECT name FROM decks_legacy").fetchall()
         for row in rows:
             conn_obj.execute(
-                "INSERT INTO decks(public_id, name, type) VALUES(?, ?, 'speach')",
+                "INSERT INTO decks(public_id, name, type) VALUES(?, ?, 'speech')",
                 (str(uuid4()), row["name"]),
             )
         conn_obj.execute("DROP TABLE decks_legacy")
@@ -237,8 +237,16 @@ class DatabaseManager:
         """Ensure decks table tracks the deck type."""
         if not DatabaseManager._column_exists(conn_obj, "decks", "type"):
             conn_obj.execute(
-                "ALTER TABLE decks ADD COLUMN type TEXT NOT NULL DEFAULT 'speach'"
+                "ALTER TABLE decks ADD COLUMN type TEXT NOT NULL DEFAULT 'speech'"
             )
+        DatabaseManager._normalize_deck_type_values(conn_obj)
+
+    @staticmethod
+    def _normalize_deck_type_values(conn_obj: sqlite3.Connection) -> None:
+        """Normalize stored deck type values to the supported vocabulary."""
+        conn_obj.execute(
+            "UPDATE decks SET type = 'speech' WHERE LOWER(IFNULL(type, '')) IN ('speach', '')"
+        )
 
     @staticmethod
     def _ensure_card_public_id_column(conn_obj: sqlite3.Connection) -> None:

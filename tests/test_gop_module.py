@@ -97,8 +97,8 @@ if "transformers" not in sys.modules:  # pragma: no cover - stub leve
     fake_transformers.AutoModelForCTC = _FakeModelForCTC
     sys.modules["transformers"] = fake_transformers
 
-import gop
-from gop import (
+import app.services.pron_evaluator as gop
+from app.services.pron_evaluator import (
     PhoneSegment,
     PronEvaluator,
     _approx_frame_energy_and_zcr,

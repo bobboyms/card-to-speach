@@ -31,11 +31,12 @@ Endpoints (Reviews):
 """
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
-from fastapi import Body, FastAPI, Query, HTTPException
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import config, time_utils
@@ -79,6 +80,8 @@ utc_now = time_utils.utc_now
 utc_today = time_utils.utc_today
 _normalize_due_day = time_utils.normalize_due_day
 
+logger = logging.getLogger(__name__)
+
 
 def init_db() -> None:
     """Initialize database schema using the current database path."""
@@ -86,33 +89,55 @@ def init_db() -> None:
     db_manager.initialize()
 
 
-# Instantiate repositories
-deck_repository = DeckRepository(db_manager)
-card_repository = CardRepository(db_manager)
+def get_deck_repository() -> DeckRepository:
+    return DeckRepository(db_manager)
 
 
-# Instantiate services with dynamic providers so monkeypatching on this module still works
-deck_service = DeckService(deck_repository)
-card_service = CardService(
-    card_repository,
-    deck_service,
-    lambda: utc_now(),
-)
-review_service = ReviewService(
-    card_repository,
-    card_service,
-    deck_service,
-    lambda: utc_now(),
-    lambda: utc_today(),
-    lambda days, ref: _normalize_due_day(days, ref),
-    lambda: LEARNING_STEPS_MIN,
-    lambda: GRADUATE_GOOD_DAYS,
-    lambda: GRADUATE_EASY_DAYS,
-    lambda: NORMALIZE_TO_DAY_START,
-    lambda: LEARN_AHEAD_MIN,
-    lambda: LEARN_AHEAD_IF_EMPTY,
-    lambda: MIN_EF,
-)
+def get_card_repository() -> CardRepository:
+    return CardRepository(db_manager)
+
+
+def get_deck_service(
+    repo: DeckRepository = Depends(get_deck_repository),
+) -> DeckService:
+    return DeckService(repo)
+
+
+def get_card_service(
+    repo: CardRepository = Depends(get_card_repository),
+    deck_service: DeckService = Depends(get_deck_service),
+) -> CardService:
+    return CardService(
+        repo,
+        deck_service,
+        utc_now,
+    )
+
+
+def get_review_service(
+    card_repo: CardRepository = Depends(get_card_repository),
+    card_service: CardService = Depends(get_card_service),
+    deck_service: DeckService = Depends(get_deck_service),
+) -> ReviewService:
+    return ReviewService(
+        card_repo,
+        card_service,
+        deck_service,
+        utc_now,
+        utc_today,
+        _normalize_due_day,
+        lambda: LEARNING_STEPS_MIN,
+        lambda: GRADUATE_GOOD_DAYS,
+        lambda: GRADUATE_EASY_DAYS,
+        lambda: NORMALIZE_TO_DAY_START,
+        lambda: LEARN_AHEAD_MIN,
+        lambda: LEARN_AHEAD_IF_EMPTY,
+        lambda: MIN_EF,
+    )
+
+
+def get_evaluate_pronunciation() -> Callable[[str, str, str], Dict[str, Any]]:
+    return evaluate_pronunciation
 
 
 # ---------------
@@ -140,25 +165,37 @@ app.add_middleware(
 # Endpoints – Decks
 # ------------------------
 @app.post("/decks", response_model=DeckOut, status_code=201)
-def create_deck(payload: DeckCreate):
-    """Create a new deck with an explicit type ('speach' or 'shadowing')."""
+def create_deck(
+    payload: DeckCreate,
+    deck_service: DeckService = Depends(get_deck_service),
+):
+    """Create a new deck with an explicit type ('speech' or 'shadowing')."""
     return deck_service.create(payload)
 
 
 @app.get("/decks", response_model=List[DeckOut])
-def list_decks():
+def list_decks(
+    deck_service: DeckService = Depends(get_deck_service),
+):
     """List all decks."""
     return deck_service.list()
 
 
 @app.patch("/decks/{public_id}", response_model=DeckOut)
-def rename_deck(public_id: str, payload: DeckRename):
+def rename_deck(
+    public_id: str,
+    payload: DeckRename,
+    deck_service: DeckService = Depends(get_deck_service),
+):
     """Rename an existing deck identified by its public UUID."""
     return deck_service.rename(public_id, payload)
 
 
 @app.delete("/decks/{public_id}", status_code=204)
-def delete_deck(public_id: str):
+def delete_deck(
+    public_id: str,
+    deck_service: DeckService = Depends(get_deck_service),
+):
     """Delete the specified deck by its public UUID."""
     deck_service.delete(public_id)
     return
@@ -168,7 +205,10 @@ def delete_deck(public_id: str):
 # Endpoints – Cards
 # ------------------------
 @app.post("/cards", response_model=CardOut, status_code=201)
-def create_card(payload: CardCreate):
+def create_card(
+    payload: CardCreate,
+    card_service: CardService = Depends(get_card_service),
+):
     """Create a card in learning mode."""
     return card_service.create(payload)
 
@@ -177,6 +217,7 @@ def create_card(payload: CardCreate):
 def list_cards(
     deck_id: str = Query(..., description="Deck public UUID"),
     limit: int = Query(50, ge=1, le=500),
+    card_service: CardService = Depends(get_card_service),
 ):
     """List cards for a deck ordered by due timestamp."""
     return card_service.list_by_deck(deck_id, limit)
@@ -187,25 +228,36 @@ def list_due(
     deck_id: str = Query(..., description="Deck public UUID"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    card_service: CardService = Depends(get_card_service),
 ):
     """Return paginated due cards for a deck."""
     return card_service.list_due(deck_id, limit, offset)
 
 
 @app.get("/cards/{card_public_id}", response_model=CardOut)
-def get_card(card_public_id: str):
+def get_card(
+    card_public_id: str,
+    card_service: CardService = Depends(get_card_service),
+):
     """Fetch a card by public UUID."""
     return card_service.get(card_public_id)
 
 
 @app.patch("/cards/{card_public_id}", response_model=CardOut)
-def update_card(card_public_id: str, payload: CardUpdate):
+def update_card(
+    card_public_id: str,
+    payload: CardUpdate,
+    card_service: CardService = Depends(get_card_service),
+):
     """Update the content, deck, or tags of a card."""
     return card_service.update(card_public_id, payload)
 
 
 @app.delete("/cards/{card_public_id}", status_code=204)
-def delete_card(card_public_id: str):
+def delete_card(
+    card_public_id: str,
+    card_service: CardService = Depends(get_card_service),
+):
     """Remove a card from the collection."""
     card_service.delete(card_public_id)
     return
@@ -215,39 +267,55 @@ def delete_card(card_public_id: str):
 # Endpoints – Reviews
 # ------------------------
 @app.get("/reviews/next", response_model=CardOut)
-def peek_next_due(deck_id: str = Query(..., description="Deck public UUID")):
+def peek_next_due(
+    deck_id: str = Query(..., description="Deck public UUID"),
+    review_service: ReviewService = Depends(get_review_service),
+):
     """Return the next due card for the requested deck using due, learn-ahead, and fallback rules."""
     return review_service.peek_next_due(deck_id)
 
 
 @app.post("/reviews/next", response_model=ReviewOut)
-def review_next_due_grade(deck_id: str = Query(..., description="Deck public UUID"), payload: ReviewIn = ...):
+def review_next_due_grade(
+    deck_id: str = Query(..., description="Deck public UUID"),
+    payload: ReviewIn = ...,
+    review_service: ReviewService = Depends(get_review_service),
+):
     """Apply an SM-2 grade to the next due card (same selection criteria as the GET endpoint)."""
     return review_service.review_next_due_by_grade(deck_id, payload.grade)
 
 
 @app.post("/cards/{card_public_id}/review", response_model=ReviewOut)
-def review_card_button(card_public_id: str, payload: ReviewButtonIn = Body(...)):
+def review_card_button(
+    card_public_id: str,
+    payload: ReviewButtonIn = Body(...),
+    review_service: ReviewService = Depends(get_review_service),
+):
     """Review a specific card by mapping the button press to the corresponding SM-2 grade."""
     return review_service.review_card_button(card_public_id, payload.button)
 
 
 @app.post("/evaluate", response_model=EvalResponse)
-def evaluate(req: EvalRequest):
-    if req.phoneme_fmt not in {"ipa", "ascii", "arpabet"}:
-        raise HTTPException(status_code=400, detail="phoneme_fmt deve ser 'ipa', 'ascii' ou 'arpabet'")
+def evaluate(
+    req: EvalRequest,
+    evaluate_fn: Callable[[str, str, str], Dict[str, Any]] = Depends(get_evaluate_pronunciation),
+):
     # Decodificar base64 -> arquivo temporário
     audio_path = b64_to_temp_audio_file(req.audio_b64)
     try:
-        raw_results = evaluate_pronunciation(
+        raw_results = evaluate_fn(
             audio_path=audio_path,
             target_text=req.target_text,
             phoneme_fmt=req.phoneme_fmt,
         )
-    except RuntimeError as e:
-        raise HTTPException(status_code=501, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falha na avaliação: {e}")
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        logger.exception("Pronunciation evaluation failed due to runtime error")
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Unexpected error during pronunciation evaluation")
+        raise HTTPException(status_code=500, detail="Falha interna ao avaliar a pronúncia") from exc
     finally:
         # limpe o temporário
         try:
@@ -257,26 +325,26 @@ def evaluate(req: EvalRequest):
 
     return _format_evaluation_response(raw_results, req.phoneme_fmt)
 
-def _format_evaluation_response(results: Dict[str, Any], phoneme_fmt: str) -> Dict[str, Any]:
+def _format_evaluation_response(results: Dict[str, Any], phoneme_fmt: str) -> EvalResponse:
     """Adapt the internal evaluation payload to the public API schema."""
     words: List[Dict[str, Any]] = list(results.get("words") or [])
     intelligibility_score = float(results.get("intelligibility", 0.0))
     word_accuracy_rate = float(results.get("word_accuracy_rate", 0.0))
     fluency_level = results.get("fluency_level")
 
-    return {
-        "intelligibility": {
+    return EvalResponse(
+        intelligibility={
             "score": intelligibility_score,
             "word_accuracy_rate": word_accuracy_rate,
         },
-        "phonetic_analysis": {
+        phonetic_analysis={
             "fluency_level": fluency_level,
             "words": words,
         },
-        "meta": {
+        meta={
             "phoneme_fmt": phoneme_fmt,
         },
-    }
+    )
 
 
 # ------------------------

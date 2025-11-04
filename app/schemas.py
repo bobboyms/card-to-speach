@@ -9,11 +9,26 @@ from pydantic import BaseModel, Field, field_validator
 # from app.evaluate import DEFAULT_MODEL
 
 
+def _normalize_deck_type(deck_type: str) -> str:
+    normalized = (deck_type or "").strip().lower()
+    if normalized == "speach":
+        return "speech"
+    return normalized
+
+
 class DeckCreate(BaseModel):
     name: str = Field(..., min_length=1)
-    type: Literal["speach", "shadowing"] = Field(
-        ..., description="Deck modality defining the learning flow."
+    type: Literal["speech", "shadowing", "speach"] = Field(
+        "speech", description="Deck modality defining the learning flow."
     )
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _validate_type(cls, value: str) -> str:
+        normalized = _normalize_deck_type(value)
+        if normalized not in {"speech", "shadowing"}:
+            raise ValueError("type must be 'speech' or 'shadowing'")
+        return normalized
 
 
 class DeckRename(BaseModel):
@@ -23,7 +38,7 @@ class DeckRename(BaseModel):
 class DeckOut(BaseModel):
     public_id: str
     name: str
-    type: Literal["speach", "shadowing"]
+    type: Literal["speech", "shadowing"]
     due_cards: int
     total_cards: int
 
@@ -103,10 +118,31 @@ class CardsPage(BaseModel):
 class EvalRequest(BaseModel):
     target_text: str = Field(..., description="Frase-alvo em inglês")
     audio_b64: str = Field(..., description="Áudio codificado em base64 (pode ser data URL)")
-    phoneme_fmt: str = Field("ipa", description="Formato de fonemas: ipa|ascii|arpabet")
+    phoneme_fmt: Literal["ipa"] = Field("ipa", description="Formato de fonemas suportado: somente 'ipa'")
     # model_repo: str = Field(DEFAULT_MODEL, description="Repositório/modelo mlX Whisper")
 
+class IntelligibilityOut(BaseModel):
+    score: float
+    word_accuracy_rate: float
+
+
+class WordAnalysisOut(BaseModel):
+    target_word: Optional[str]
+    target_phones: List[Any] = Field(default_factory=list)
+    produced_phone: List[Any] = Field(default_factory=list)
+    per: float
+    gop: float
+    ops: List[str] = Field(default_factory=list)
+    pronunciation_quality: Optional[str]
+    audio_b64: Optional[str]
+
+
+class PhoneticAnalysisOut(BaseModel):
+    fluency_level: Optional[str]
+    words: List[WordAnalysisOut]
+
+
 class EvalResponse(BaseModel):
-    intelligibility: dict
-    phonetic_analysis: dict
-    meta: dict
+    intelligibility: IntelligibilityOut
+    phonetic_analysis: PhoneticAnalysisOut
+    meta: Dict[str, Any]

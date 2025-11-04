@@ -1,7 +1,10 @@
 import base64
 import os
 import tempfile
-from http.client import HTTPException
+from pathlib import Path
+from typing import Union
+
+from fastapi import HTTPException
 
 def guess_audio_extension(header: bytes) -> str:
     if header.startswith(b"RIFF"):  # WAV
@@ -37,32 +40,8 @@ def b64_to_temp_audio_file(b64_str: str) -> str:
         f.write(raw)
     return path
 
-import base64
-import os
-from typing import Union
-from pathlib import Path
-
 def mp3_to_base64(path: Union[str, os.PathLike]) -> str:
-    """
-    Converte um arquivo .mp3 em uma string Base64.
-
-    Parâmetros
-    ----------
-    path : str | PathLike
-        Caminho para o arquivo .mp3.
-    as_data_uri : bool
-        Se True, retorna no formato Data URI ("data:audio/mpeg;base64,...").
-
-    Retorna
-    -------
-    str
-        String Base64 (ou Data URI se as_data_uri=True).
-
-    Levanta
-    -------
-    FileNotFoundError: se o arquivo não existir
-    ValueError: se a extensão não for .mp3
-    """
+    """Converte um arquivo MP3 em uma string Base64 simples."""
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(f"Arquivo não encontrado: {p}")
