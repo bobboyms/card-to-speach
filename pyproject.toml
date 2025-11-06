@@ -16,6 +16,7 @@ dependencies = [
     "librosa>=0.11.0",
     "mlx-whisper>=0.4.3",
     "numba>=0.62.1",
+    "numpy>=2.3.4",
     "onnxruntime>=1.23.2",
     "openai-whisper>=20250625",
     "phonecodes>=1.2.2",

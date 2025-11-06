@@ -1566,6 +1566,243 @@ def _pause_stats(is_pause_trim: np.ndarray, sr_frames_hz: float,
 #     return fluency_basic, fluency_details
 #
 
+def _entropy_from_logpost(seg_log_post: np.ndarray) -> float:
+    """
+    Entropia média dos pós-termos em um segmento (log-posteriors -> prob).
+    Retorna 0.0 se o segmento for vazio.
+    """
+    if seg_log_post.size == 0:
+        return 0.0
+    P = np.exp(seg_log_post)  # [L,V], já soma 1 por frame
+    # Evita log(0) com clip bem pequeno
+    P = np.clip(P, 1e-12, 1.0)
+    H = -np.sum(P * np.log(P), axis=1)  # [L]
+    return float(np.mean(H))
+
+def _flip_rate(argmax_ids: np.ndarray, fps: float) -> float:
+    """
+    Mudanças de rótulo por segundo (apenas entre frames consecutivos).
+    """
+    if argmax_ids.size <= 1 or fps <= 0:
+        return 0.0
+    flips = np.count_nonzero(np.diff(argmax_ids) != 0)
+    dur_s = argmax_ids.size / fps
+    return float(flips / max(dur_s, 1e-6))
+
+def _word_frame_span_from_phones(word_item: dict) -> Optional[Tuple[int,int]]:
+    """
+    A partir de word_item['phones'] (com t1,t2), devolve (t1_min, t2_max) em frames.
+    Retorna None se não houver phones com limites válidos.
+    """
+    spans = [(int(p.get("t1", -1)), int(p.get("t2", -1))) for p in (word_item.get("phones") or [])]
+    spans = [(a,b) if (a >= 0 and b >= 0 and b >= a) else None for (a,b) in spans]
+    spans = [s for s in spans if s is not None]
+    if not spans:
+        return None
+    t1 = min(a for a,_ in spans)
+    t2 = max(b for _,b in spans)
+    return (t1, t2)
+
+def _duration_z_scores_per_word(word_item: dict, frames_to_ms: float) -> List[float]:
+    """
+    Calcula z-score de duração por fone usando μ/σ simples por CLASSE:
+      vogais: μ=100ms, σ=35ms; consoantes: μ=60ms, σ=25ms.
+    Se um fone não tiver classe conhecida, usa μ=80ms, σ=30ms.
+    Retorna lista de |z| por fone (para depois fazer média).
+    """
+    mu_v, sd_v = 100.0, 35.0
+    mu_c, sd_c = 60.0, 25.0
+    mu_u, sd_u = 80.0, 30.0
+
+    out = []
+    for p in (word_item.get("phones") or []):
+        t1, t2 = int(p.get("t1", -1)), int(p.get("t2", -1))
+        if t1 < 0 or t2 < 0 or t2 < t1:
+            continue
+        dur_ms = (t2 - t1 + 1) * frames_to_ms
+        ph = p.get("phone", "")
+        cls = is_vowel(ph)
+        if cls is True:
+            mu, sd = mu_v, sd_v
+        elif cls is False:
+            mu, sd = mu_c, sd_c
+        else:
+            mu, sd = mu_u, sd_u
+        z = 0.0 if sd <= 1e-6 else (dur_ms - mu) / sd
+        out.append(abs(float(z)))
+    return out
+
+def _intra_word_pause_ms(is_pause: np.ndarray, t1: int, t2: int, fps: float) -> float:
+    """
+    Soma de pausas (frames True) dentro do intervalo [t1,t2] em milissegundos.
+    """
+    if is_pause.size == 0 or t1 < 0 or t2 < 0 or t2 < t1:
+        return 0.0
+    sub = is_pause[max(0, t1):min(is_pause.size, t2+1)]
+    return float(sub.sum() / max(fps, 1e-6) * 1000.0)
+
+def _micro_fluency(words_out: List[dict],
+                   log_post: np.ndarray,
+                   phone_argmax_ids: np.ndarray,
+                   is_pause: np.ndarray,
+                   frames_per_sec: float) -> Tuple[dict, float]:
+    """
+    Calcula métricas de micro-fluência por palavra e um score agregado (0–1).
+    Retorna (details_dict, micro_score_overall).
+    """
+    # Normalizadores/limiares
+    H_MAX = 4.0       # entropia ~ log(V_eff); 4 é um cap razoável p/ vocabulários de fones
+    FLIP_CAP = 15.0   # flips/seg onde penalidade satura
+    INTRA_PAUSE_CAP = 300.0  # ms para saturar penalidade
+    frames_to_ms = 1000.0 / max(frames_per_sec, 1e-6)
+
+    per_word = []
+    scores = []
+
+    for w in words_out:
+        span = _word_frame_span_from_phones(w)
+        if span is None:
+            # Sem limites por fone → pula (ou usa tudo)
+            t1, t2 = 0, min(log_post.shape[0]-1, int(round(0.4*log_post.shape[0])))
+        else:
+            t1, t2 = span
+
+        seg_lp = log_post[max(0,t1):min(log_post.shape[0], t2+1), :]
+        seg_amax = phone_argmax_ids[max(0,t1):min(len(phone_argmax_ids), t2+1)]
+        seg_pause = is_pause[max(0,t1):min(is_pause.size, t2+1)]
+        seg_speech = ~seg_pause
+
+        # Entropia média em fala (se não houver fala, cai para o segmento bruto)
+        if seg_speech.any():
+            H = _entropy_from_logpost(seg_lp[seg_speech])
+            amax = seg_amax[seg_speech]
+            fps_local = frames_per_sec
+        else:
+            H = _entropy_from_logpost(seg_lp)
+            amax = seg_amax
+            fps_local = frames_per_sec
+
+        flips = _flip_rate(amax.astype(int), fps_local) if amax.size else 0.0
+        z_list = _duration_z_scores_per_word(w, frames_to_ms)
+        mean_abs_z = float(np.mean(z_list)) if z_list else 0.0
+        pause_ms = _intra_word_pause_ms(is_pause, t1, t2, frames_per_sec)
+
+        # Componentes em [0,1] (↑ melhor)
+        s_gop = float(w.get("word_score_gop", 0.0))              # já em [0,1] no seu pipeline
+        s_ent = 1.0 - min(1.0, H / H_MAX)
+        s_flip = 1.0 - min(1.0, flips / FLIP_CAP)
+        s_dur = 1.0 - min(1.0, (mean_abs_z / 2.0))                # |z|≈2 → penalidade máxima
+
+        # Agregação (pesos podem ser ajustados conforme validação)
+        score = 0.40*s_gop + 0.25*s_ent + 0.20*s_dur + 0.15*s_flip
+        penalty = 1.0 - min(1.0, pause_ms / INTRA_PAUSE_CAP)
+        score = float(max(0.0, min(1.0, score * penalty)))
+
+        per_word.append({
+            "target_word": w.get("target_word",""),
+            "micro": {
+                "entropy_mean": round(H, 4),
+                "flip_rate_hz": round(flips, 3),
+                "mean_abs_duration_z": round(mean_abs_z, 3),
+                "intra_word_pause_ms": round(pause_ms, 1),
+                "s_gop": round(s_gop, 3),
+                "s_ent": round(s_ent, 3),
+                "s_flip": round(s_flip, 3),
+                "s_dur": round(s_dur, 3),
+                "score": round(score, 3),
+            }
+        })
+        scores.append(score)
+
+    overall = float(np.mean(scores)) if scores else 0.0
+    details = {"per_word": per_word, "score_overall": round(overall, 3)}
+    return details, overall
+
+# ===== Helpers p/ score numérico de fluência =====
+# def _clip01(x: float) -> float:
+#     return float(max(0.0, min(1.0, x)))
+#
+# def _norm_up(x: float, lo: float, hi: float) -> float:
+#     """Mapeia x para [0,1] assumindo que 'lo' é ruim e 'hi' é bom (satura fora)."""
+#     if hi <= lo: return 0.0
+#     return _clip01((x - lo) / (hi - lo))
+#
+# def _norm_down(x: float, lo: float, hi: float) -> float:
+#     """Mapeia x para [0,1] quando valores menores são melhores (ex.: pausa)."""
+#     # equivale a 1 - _norm_up(x, lo, hi)
+#     return 1.0 - _norm_up(x, lo, hi)
+#
+# def _macro_fluency_score(words_per_sec: float,
+#                          pause_ratio_full: float,
+#                          articulation_rate_syll_per_sec: float) -> float:
+#     """
+#     Constrói um score de 0–1 com 3 componentes normalizados:
+#       - taxa de palavras (bom ~ 2.5–3.5 wps)
+#       - pausa (bom ~ <=0.15, ruim ~ >=0.40)
+#       - articulation rate (bom ~ 3.5–6.0 sílabas/s)
+#     Pesos dão ênfase a pausas e taxa.
+#     """
+#
+#
+#
+#     s_rate  = _norm_up(words_per_sec, lo=1.0, hi=3.0)               # 1→0, 3→1
+#     s_pause = _norm_down(pause_ratio_full, lo=0.15, hi=0.40)        # 0.40→0, 0.15→1
+#     s_artic = _norm_up(articulation_rate_syll_per_sec, lo=2.0, hi=6.0)
+#
+#     print("words_per_sec", s_rate)
+#     print("pause_ratio_full", s_pause)
+#     print("articulation_rate_syll_per_sec", s_artic)
+#
+#     # pesos (ajustáveis): pausas têm maior impacto
+#     w_rate, w_pause, w_artic = 0.45, 0.20, 0.35
+#     score = _clip01(w_rate*s_rate + w_pause*s_pause + w_artic*s_artic) #
+#     # comps = {
+#     #     "s_rate": round(s_rate, 3),
+#     #     "s_pause": round(s_pause, 3),
+#     #     "s_artic": round(s_artic, 3),
+#     #     "weights": {"rate": w_rate, "pause": w_pause, "artic": w_artic}
+#     # }
+#     return score
+
+def _norm01_from_range(x, lo, hi):
+    if hi <= lo: return 0.0
+    return float(max(0.0, min(1.0, (x - lo) / (hi - lo))))
+
+def _macro_fluency_score(words_per_sec_pruned: float,
+                            pause_ratio_full: float,
+                            articulation_rate_syll_per_sec: float,
+                            ranges: dict = None):
+    """
+    ranges: optional dict with keys 'rate_lo','rate_hi','pause_lo','pause_hi','art_lo','art_hi'
+    If ranges is None use sensible defaults (but better: compute from corpus percentiles).
+    """
+    if ranges is None:
+        ranges = {
+            "rate_lo": 1.0, "rate_hi": 3.0,      # pruned words/sec
+            "pause_lo": 0.15, "pause_hi": 0.65, # pause ratio (silent)
+            "art_lo": 2.5, "art_hi": 6.0,       # syl/sec (articulation)
+        }
+
+
+
+    s_rate  = _norm01_from_range(words_per_sec_pruned, ranges["rate_lo"], ranges["rate_hi"])
+    s_pause = 1.0 - _norm01_from_range(pause_ratio_full, ranges["pause_lo"], ranges["pause_hi"])
+    s_artic = _norm01_from_range(articulation_rate_syll_per_sec, ranges["art_lo"], ranges["art_hi"])
+
+    print("words_per_sec_pruned", words_per_sec_pruned)
+    print("pause_ratio_full", pause_ratio_full)
+    print("pause_ratio_full", articulation_rate_syll_per_sec)
+    print("++++++++++")
+    print("words_per_sec_pruned", s_rate)
+    print("pause_ratio_full", s_pause)
+    print("pause_ratio_full", s_artic)
+
+    # pesos: idealmente aprendidos; aqui pesos balanceados como exemplo
+    w_rate, w_pause, w_artic = 0.50, 0.40, 0.2
+    score_raw = w_rate*s_rate + w_pause*s_pause + w_artic*s_artic
+    return float(max(0.0, min(1.0, score_raw)))
+
+
 def compute_fluency(audio: np.ndarray, log_post: np.ndarray, tok2id: dict,
                     words_out: List[dict], ref_phones_all: List[str],
                     phone_argmax_ids: List[int], blank_id: int,
@@ -1582,10 +1819,10 @@ def compute_fluency(audio: np.ndarray, log_post: np.ndarray, tok2id: dict,
     vad_pause = ~vad_speech
     is_pause = model_pause | vad_pause
 
-    # --- métricas “de cobertura” no trecho inteiro ---
+    # --- métricas “full” (para frases longas) ---
     pause_ratio_full = float(np.mean(is_pause)) if is_pause.size > 0 else 0.0
 
-    # --- recorte para métricas baseadas em fala efetiva (p.ex. articulation rate) ---
+    # --- recorte para métricas baseadas em fala ---
     if trim_silence:
         speech_mask = ~is_pause
         trimmed_speech, i1, i2 = _trim_leading_trailing(speech_mask)
@@ -1600,24 +1837,15 @@ def compute_fluency(audio: np.ndarray, log_post: np.ndarray, tok2id: dict,
         is_pause_trim = is_pause
         dur_trim_s = dur_full_s
 
-    # --- taxas globais por segundo usam a duração total (alinha com o teste) ---
+    # --- taxas globais (sempre definidas) ---
     n_words = len(words_out)
     n_ref_phones = len(ref_phones_all)
     duration_s = max(dur_full_s, 1e-6)
     words_per_sec = n_words / duration_s
     phones_per_sec = n_ref_phones / duration_s
-
-    # nível de fluência baseado nas métricas “cheias”
-    if words_per_sec >= 2.4 and pause_ratio_full <= 0.25:
-        level = "high"
-    elif words_per_sec >= 1.5 and pause_ratio_full <= 0.30:
-        level = "medium"
-    else:
-        level = "low"
-
     wpm = words_per_sec * 60.0
 
-    # articulation rate baseado no tempo de fala **dentro do recorte**
+    # --- articulation rate baseado no tempo de fala (recortado) ---
     if is_pause_trim.size > 0:
         speech_frames = int((~is_pause_trim).sum())
         speech_time_s = (dur_trim_s if dur_trim_s > 0 else duration_s) * (speech_frames / max(is_pause_trim.size, 1))
@@ -1626,28 +1854,155 @@ def compute_fluency(audio: np.ndarray, log_post: np.ndarray, tok2id: dict,
     total_syll = sum(int(w.get("syllables", 1)) for w in words_out)
     articulation_rate = (total_syll / max(speech_time_s, 1e-6)) if total_syll > 0 else 0.0
 
+    # --- base de frames/seg para estatísticas ---
     frames_per_sec = (is_pause_trim.size / max(dur_trim_s, 1e-6)) if (dur_trim_s > 0 and is_pause_trim.size > 0) \
                      else (is_pause.size / max(duration_s, 1e-6) if is_pause.size > 0 else 0.0)
     pause_ext = _pause_stats(is_pause_trim, frames_per_sec if frames_per_sec>0 else 1.0, words_out, [])
 
-    filler_words = [w.get("target_word","") for w in words_out if w.get("target_word","") in ("uh","um")]
+    # --- MODO MICRO-FLUÊNCIA: ativa se fala for curta ---
+    short_utterance = (n_words <= 2) or (dur_full_s < 1.0)
+    micro_details = None
+    micro_score = None
+    if short_utterance:
+        micro_details, micro_score = _micro_fluency(
+            words_out=words_out,
+            log_post=log_post,
+            phone_argmax_ids=np.array(phone_argmax_ids, dtype=int),
+            is_pause=is_pause,
+            frames_per_sec=float(frames_per_sec if frames_per_sec>0 else (T / max(duration_s,1e-6)))
+        )
 
+    # --- nível de fluência ---
+    if short_utterance and micro_score is not None:
+        # limiares simples sugeridos para curtas
+        fluency_score = micro_score
+        if micro_score >= 0.80:
+            level = "high"
+        elif micro_score >= 0.60:
+            level = "medium"
+        else:
+            level = "low"
+    else:
+        # heurística global original
+
+        fluency_score = _macro_fluency_score(words_per_sec, pause_ratio_full, articulation_rate)
+
+        # articulation_rate, words_per_sec, pause_ratio_full
+        if words_per_sec >= 2.4 and pause_ratio_full <= 0.25:
+            level = "high"
+        elif words_per_sec >= 1.5 and pause_ratio_full <= 0.30:
+            level = "medium"
+        else:
+            level = "low"
+
+    # --- montar saídas ---
     fluency_basic = {
-        "duration_s": float(dur_full_s),        # <<< duração total (0.5 s no teste)
+        "duration_s": float(dur_full_s),
         "words_per_sec": float(words_per_sec),
         "phones_per_sec": float(phones_per_sec),
-        "pause_ratio": float(pause_ratio_full), # <<< pausa no trecho inteiro (~0.5 no teste)
+        "pause_ratio": float(pause_ratio_full),
         "level": level,
+        "fluency_score": fluency_score,
     }
 
     fluency_details = {
         "wpm": float(wpm),
         "articulation_rate_syll_per_sec": float(articulation_rate),
         **pause_ext,
-        "fillers": {"count": int(len(filler_words)), "examples": filler_words[:5]},
+        "fillers": {
+            "count": int(len([w.get("target_word","") for w in words_out if w.get("target_word","") in ("uh","um")])),
+            "examples": [w.get("target_word","") for w in words_out if w.get("target_word","") in ("uh","um")][:5],
+        },
     }
 
+    # anexa micro-detalhes quando aplicável
+    if micro_details is not None:
+        fluency_details["micro_fluency"] = micro_details
+
     return fluency_basic, fluency_details
+
+# def compute_fluency(audio: np.ndarray, log_post: np.ndarray, tok2id: dict,
+#                     words_out: List[dict], ref_phones_all: List[str],
+#                     phone_argmax_ids: List[int], blank_id: int,
+#                     trim_silence: bool = True) -> Tuple[dict, dict]:
+#     T, V = log_post.shape
+#     dur_full_s = float(len(audio) / 16000.0) if len(audio) > 0 else 0.0
+#
+#     argm = np.array(phone_argmax_ids, dtype=int)
+#     sil_ids = [tok2id[t] for t in ("sil","spn","nsn") if t in tok2id]
+#     model_pause = np.isin(argm, sil_ids) if len(sil_ids) > 0 else np.zeros(T, dtype=bool)
+#
+#     am, zcr = _approx_frame_energy_and_zcr(audio, T)
+#     vad_speech = _vad_mask_from_energy(am, zcr)
+#     vad_pause = ~vad_speech
+#     is_pause = model_pause | vad_pause
+#
+#     # --- métricas “de cobertura” no trecho inteiro ---
+#     pause_ratio_full = float(np.mean(is_pause)) if is_pause.size > 0 else 0.0
+#
+#     # --- recorte para métricas baseadas em fala efetiva (p.ex. articulation rate) ---
+#     if trim_silence:
+#         speech_mask = ~is_pause
+#         trimmed_speech, i1, i2 = _trim_leading_trailing(speech_mask)
+#         if i2 >= i1:
+#             is_pause_trim = ~trimmed_speech
+#             T_trim = i2 - i1 + 1
+#             dur_trim_s = dur_full_s * (T_trim / max(T, 1))
+#         else:
+#             is_pause_trim = np.zeros(0, dtype=bool)
+#             dur_trim_s = 0.0
+#     else:
+#         is_pause_trim = is_pause
+#         dur_trim_s = dur_full_s
+#
+#     # --- taxas globais por segundo usam a duração total (alinha com o teste) ---
+#     n_words = len(words_out)
+#     n_ref_phones = len(ref_phones_all)
+#     duration_s = max(dur_full_s, 1e-6)
+#     words_per_sec = n_words / duration_s
+#     phones_per_sec = n_ref_phones / duration_s
+#
+#     # nível de fluência baseado nas métricas “cheias”
+#     if words_per_sec >= 2.4 and pause_ratio_full <= 0.25:
+#         level = "high"
+#     elif words_per_sec >= 1.5 and pause_ratio_full <= 0.30:
+#         level = "medium"
+#     else:
+#         level = "low"
+#
+#     wpm = words_per_sec * 60.0
+#
+#     # articulation rate baseado no tempo de fala **dentro do recorte**
+#     if is_pause_trim.size > 0:
+#         speech_frames = int((~is_pause_trim).sum())
+#         speech_time_s = (dur_trim_s if dur_trim_s > 0 else duration_s) * (speech_frames / max(is_pause_trim.size, 1))
+#     else:
+#         speech_time_s = duration_s
+#     total_syll = sum(int(w.get("syllables", 1)) for w in words_out)
+#     articulation_rate = (total_syll / max(speech_time_s, 1e-6)) if total_syll > 0 else 0.0
+#
+#     frames_per_sec = (is_pause_trim.size / max(dur_trim_s, 1e-6)) if (dur_trim_s > 0 and is_pause_trim.size > 0) \
+#                      else (is_pause.size / max(duration_s, 1e-6) if is_pause.size > 0 else 0.0)
+#     pause_ext = _pause_stats(is_pause_trim, frames_per_sec if frames_per_sec>0 else 1.0, words_out, [])
+#
+#     filler_words = [w.get("target_word","") for w in words_out if w.get("target_word","") in ("uh","um")]
+#
+#     fluency_basic = {
+#         "duration_s": float(dur_full_s),        # <<< duração total (0.5 s no teste)
+#         "words_per_sec": float(words_per_sec),
+#         "phones_per_sec": float(phones_per_sec),
+#         "pause_ratio": float(pause_ratio_full), # <<< pausa no trecho inteiro (~0.5 no teste)
+#         "level": level,
+#     }
+#
+#     fluency_details = {
+#         "wpm": float(wpm),
+#         "articulation_rate_syll_per_sec": float(articulation_rate),
+#         **pause_ext,
+#         "fillers": {"count": int(len(filler_words)), "examples": filler_words[:5]},
+#     }
+#
+#     return fluency_basic, fluency_details
 
 
 # ========================= PER estratificado/posição + IC =========================
@@ -2854,6 +3209,9 @@ def formater_output(data):
     intelligibility = float(data.get("intelligibility", 0))
     war = float(data.get("word_accuracy_rate", 0))
     fluency_level = data.get("fluency", {}).get("level", None)
+    fluency_score = data.get("fluency", {}).get("fluency_score", 0.0)
+
+    print("fluency_score", fluency_score)
 
     words_raw = data.get("words", [])
     words = []
@@ -2874,6 +3232,7 @@ def formater_output(data):
         "intelligibility": intelligibility,
         "word_accuracy_rate": war,
         "fluency_level": fluency_level,
+        "fluency_score": fluency_score,
         "words": words,
     }
 

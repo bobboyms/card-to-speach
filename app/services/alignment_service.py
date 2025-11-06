@@ -11,6 +11,9 @@ from app.models.word_segment import WordSegment
 
 logger = logging.getLogger(__name__)
 
+class AlignmentFailedError(RuntimeError):
+    """Raised when CTC backtracking cannot build a valid alignment path."""
+
 @dataclass
 class _Point:
     token_index: int
@@ -44,7 +47,7 @@ class ForcedAlignmentService:
             logger.info("Carregando wav2vec2 bundle para alinhamento...")
             self._model = self._bundle.get_model().to(self.device).eval()
             self._labels = self._bundle.get_labels()
-            self._bundle_sr = self._bundle.sample_rate
+            self._bundle_sr = int(self._bundle.sample_rate)
 
     @staticmethod
     def _normalize_transcript(text: str) -> str:
@@ -54,12 +57,18 @@ class ForcedAlignmentService:
         return "|" + text_ascii.replace(" ", "|") + "|"
 
     def _emission(self, waveform: torch.Tensor) -> torch.Tensor:
+        self._ensure_model()
+        assert self._model is not None
         with torch.inference_mode():
             emissions, _ = self._model(waveform.to(self.device))
             emissions = torch.log_softmax(emissions, dim=-1)
         return emissions[0].cpu()  # [T, C]
 
     def _text_to_tokens(self, transcript_bar: str) -> List[int]:
+        # ensure labels are available for type checkers and at runtime
+        if self._labels is None:
+            self._ensure_model()
+        assert self._labels is not None
         dictionary = {c: i for i, c in enumerate(self._labels)}
         return [dictionary[c] for c in transcript_bar]
 
@@ -83,7 +92,8 @@ class ForcedAlignmentService:
         t, j = trellis.size(0) - 1, trellis.size(1) - 1
         path = [_Point(j, t, emission[t, blank_id].exp().item())]
         while j > 0:
-            assert t > 0
+            if t <= 0:
+                raise AlignmentFailedError("trellis exhausted before all tokens were matched")
             p_stay = emission[t - 1, blank_id]
             p_change = emission[t - 1, tokens[j]]
             stayed = trellis[t - 1, j] + p_stay
@@ -139,14 +149,34 @@ class ForcedAlignmentService:
         emission = self._emission(waveform)
         transcript_bar = self._normalize_transcript(transcript_text)
         tokens = self._text_to_tokens(transcript_bar)
+
+        # Trellis needs more frames than tokens; otherwise short or silent audios have no path.
+        if emission.size(0) <= len(tokens):
+            logger.warning(
+                "Alinhamento ignorado: audio com %d frames e transcript com %d tokens.",
+                emission.size(0),
+                len(tokens),
+            )
+            return []
+
         trellis = self._trellis(emission, tokens, blank_id=0)
-        path = self._backtrack(trellis, emission, tokens, blank_id=0)
+
+        if not torch.isfinite(trellis[-1, -1]):
+            logger.warning("Alinhamento inválido: caminho final inatingível (trellis[-1, -1] = %s).", trellis[-1, -1])
+            return []
+
+        try:
+            path = self._backtrack(trellis, emission, tokens, blank_id=0)
+        except AlignmentFailedError as exc:
+            logger.warning("Alinhamento inválido ao reconstruir caminho: %s", exc)
+            return []
         segs = self._merge_repeats(path, transcript_bar)
         word_segs = self._merge_words(segs, sep="|")
 
         # frames -> segundos
         n_frames = emission.size(0)
         n_samples = waveform.size(1)
+        assert self._bundle_sr is not None
         ratio = (n_samples / self._bundle_sr) / float(n_frames)  # (duração em s) / n_frames
 
         words: List[WordSegment] = []

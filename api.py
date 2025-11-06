@@ -302,6 +302,7 @@ def evaluate(
 ):
     # Decodificar base64 -> arquivo temporário
     audio_path = b64_to_temp_audio_file(req.audio_b64)
+    print(f"Audio path: {audio_path}")
     try:
         raw_results = evaluate_fn(
             audio_path=audio_path,

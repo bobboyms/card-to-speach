@@ -140,10 +140,18 @@ class PronunciationEvaluationService:
             }
             words.append(word_payload)
 
+        fluency_metrics = metrics.get("fluency") if isinstance(metrics, dict) else None
+        fluency_level = fluency_metrics.get("level") if isinstance(fluency_metrics, dict) else None
+        raw_fluency_score = (
+            fluency_metrics.get("fluency_score") if isinstance(fluency_metrics, dict) else None
+        )
+        fluency_score = float(raw_fluency_score) if raw_fluency_score is not None else None
+
         return {
             "intelligibility": float(metrics.get("intelligibility", 0.0)),
             "word_accuracy_rate": self._weighted_word_accuracy(words),
-            "fluency_level": metrics.get("fluency", {}).get("level"),
+            "fluency_level": fluency_level,
+            "fluency_score": fluency_score,
             "words": words,
         }
 
@@ -208,6 +216,7 @@ def format_eval_response(results: Dict[str, Any], phoneme_fmt: str) -> EvalRespo
     intelligibility_score = float(results.get("intelligibility", 0.0))
     word_accuracy_rate = float(results.get("word_accuracy_rate", 0.0))
     fluency_level = results.get("fluency_level")
+    fluency_score = results.get("fluency_score")
 
     return EvalResponse(
         intelligibility={
@@ -216,6 +225,7 @@ def format_eval_response(results: Dict[str, Any], phoneme_fmt: str) -> EvalRespo
         },
         phonetic_analysis={
             "fluency_level": fluency_level,
+            "fluency_score": fluency_score,
             "words": words,
         },
         meta={

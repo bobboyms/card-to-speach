@@ -133,6 +133,7 @@ class WordAnalysisOut(BaseModel):
 
 class PhoneticAnalysisOut(BaseModel):
     fluency_level: Optional[str]
+    fluency_score: Optional[float]
     words: List[WordAnalysisOut]
 
 

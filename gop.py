@@ -2928,7 +2928,7 @@ def formater_output(data,
 if __name__ == "__main__":
     service = get_pron_service()
     # "meu_audio.wav" "audio.mp3"
-    result = service.evaluate("audio.mp3", "She looked guilty after lying to her friend")
+    result = service.evaluate("meu_audio.wav", "She looked guilty after lying to her friend")
 
     data = formater_output(result["sentence_metrics"])
     print(data)
