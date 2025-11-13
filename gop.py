@@ -60,6 +60,44 @@ import torch
 from transformers import AutoProcessor, AutoModelForCTC
 
 
+# --- Phonemizer setup (opcional/específico do macOS + Homebrew) ---
+try:
+    from phonemizer.backend.espeak.wrapper import EspeakWrapper
+    EspeakWrapper.set_library("/opt/homebrew/opt/espeak-ng/lib/libespeak-ng.dylib")
+except Exception:
+    pass
+
+from phonemizer import phonemize
+from phonemizer.separator import Separator
+
+phoneme_sep = Separator(phone=" ", word=" | ")
+
+_CACHE_MAXSIZE = 100_000  # cache p/ palavras
+
+@lru_cache(maxsize=_CACHE_MAXSIZE)
+def _phonemize_word(word: str) -> str:
+    return phonemize(
+        [word],
+        language="en-us",
+        backend="espeak",
+        with_stress=True,
+        strip=True,
+        separator=phoneme_sep,
+    )[0]
+
+def _tokenize_words(text: str) -> List[str]:
+    # somente letras e apóstrofo; minúsculas depois
+    return re.findall(r"[A-Za-z']+", text or "")
+
+def _phonemize_words_with_cache(words: List[str]) -> List[str]:
+    normalized = [w.lower() for w in words]
+    return [_phonemize_word(w) for w in normalized]
+
+def _strip_espeak_marks(tok: str) -> str:
+    t = tok
+    return t
+
+
 # ========================= Util: texto =========================
 
 def normalize_text(s: str) -> str:
@@ -68,9 +106,7 @@ def normalize_text(s: str) -> str:
     return s
 
 def tokenize_words(s: str) -> List[str]:
-    s = re.sub(r"[^\w\s']", " ", (s or ""))
-    s = re.sub(r"\s+", " ", s).strip().lower()
-    return [t for t in s.split() if t]
+    return _tokenize_words(s)
 
 
 # ========================= Áudio (resample otimizado) =========================
@@ -91,155 +127,7 @@ def load_audio_16k_mono(path: str) -> np.ndarray:
     return audio.astype(np.float32)
 
 
-# ========================= G2P e mapeamento =========================
-
-_g2p = G2p()
-_ARPA_RE = re.compile(r"[A-Z]+[0-2]?")  # tokens ARPAbet (com stress opcional)
-
-@lru_cache(maxsize=100_000)
-def _g2p_arpabet_tokens_cached(word_casefold: str) -> List[str]:
-    toks = [t for t in _g2p(word_casefold) if t.strip()]
-    return [t for t in toks if _ARPA_RE.fullmatch(t)]
-
-def g2p_arpabet_tokens(word: str) -> List[str]:
-    # cache por palavra em lower/casefold para maximizar acertos
-    return _g2p_arpabet_tokens_cached(word.casefold())
-
-def strip_stress(ph: str) -> str:
-    return re.sub(r"[0-2]$", "", ph)
-
-# Candidatos IPA/TIMIT por ARPAbet (ordem de preferência)
-_ARPA_TO_IPA_CANDIDATES: Dict[str, List[str]] = {
-    # Vogais
-    "AA": ["ɑ", "aa"], "AE": ["æ", "ae"], "AH": ["ʌ", "ah"], "AO": ["ɔ", "ao"],
-    "EH": ["ɛ", "eh"], "IH": ["ɪ", "ih"], "IY": ["i", "iy"], "UH": ["ʊ", "uh"], "UW": ["u", "uw"],
-    "ER": ["ɝ", "ɚ", "er"], "EY": ["eɪ", "ey"], "AY": ["aɪ", "ay"], "OW": ["oʊ", "ow"],
-    "OY": ["ɔɪ", "oy"], "AW": ["aʊ", "aw"],
-    # Consoantes
-    "P": ["p"], "B": ["b"], "T": ["t"], "D": ["d"], "K": ["k"], "G": ["ɡ", "g"],
-    "CH": ["tʃ", "ch"], "JH": ["ʤ", "dʒ", "jh"], "SH": ["ʃ", "sh"], "ZH": ["ʒ", "zh"],
-    "S": ["s"], "Z": ["z"], "F": ["f"], "V": ["v"],
-    "TH": ["θ", "th"], "DH": ["ð", "dh"],
-    "M": ["m"], "N": ["n"], "NG": ["ŋ", "ng"],
-    "L": ["l"], "R": ["ɹ", "r"], "Y": ["j", "y"], "W": ["w"], "HH": ["h", "hh"],
-    # Pausas
-    "SIL": ["sil"], "SPN": ["spn"], "NSN": ["nsn"],
-}
-
-def build_arpabet_to_model_vocab_map(model_vocab: Dict[str, int]) -> Dict[str, str]:
-    """Cria um mapeamento ARPAbet→símbolos do vocabulário do modelo (IPA/TIMIT).
-
-        A função percorre uma lista de candidatos por símbolo ARPAbet (ex.: `AE→["æ","ae"]`,
-        `CH→["tʃ","ch"]`, `ER→["ɝ","ɚ","er"]`) e escolhe **o primeiro candidato que existir**
-        no vocabulário do modelo (`model_vocab`). O retorno é um dicionário cujo *key* é o
-        símbolo ARPAbet **sem marca de acento** (stress) e o *value* é o token equivalente
-        presente no vocabulário do modelo.
-
-        Observações importantes:
-          * O stripping do stress (remover dígitos 0–2 no fim, p.ex. `AE1→AE`) **não é feito aqui**;
-            este mapeamento assume as chaves ARPAbet base (ex.: `AE`, `IY`, `CH`). O stripping ocorre
-            na fase que chama este mapeamento.
-          * Pausas/ruído `SIL`, `SPN`, `NSN` também possuem candidatos (`"sil"`, `"spn"`, `"nsn"`).
-            Se estiverem no vocabulário, serão mapeados; em etapas posteriores, esses tokens
-            normalmente são filtrados como não-fonêmicos.
-          * Quando existem múltiplos candidatos (p.ex. `ER→["ɝ","ɚ","er"]`), a **ordem dos candidatos**
-            define a preferência. Assim, se o vocabulário tiver `ɝ`, mapeia para `ɝ`; caso não, tenta
-            `ɚ`; caso não, `"er"`.
-          * O mapeamento é **determinístico** dado o `model_vocab` e a lista de candidatos embutida.
-
-        Args:
-          model_vocab (Dict[str, int]):
-              Vocabulário do modelo (tipicamente `processor.tokenizer.get_vocab()`), mapeando
-              `token -> id`. As chaves devem ser strings exatamente iguais às usadas pelo
-              tokenizador do modelo (ex.: `{"æ": 123, "tʃ": 87, "ɹ": 45, "sil": 0, ...}`).
-
-        Returns:
-          Dict[str, str]:
-              Dicionário `arpa -> token_modelo`. Inclui apenas as entradas ARPAbet cujos
-              candidatos aparecem no `model_vocab`. Entradas sem nenhum candidato presente
-              são omitidas.
-
-        Examples:
-          >>> vocab = {"æ": 10, "i": 11, "tʃ": 12, "sil": 0, "ɹ": 13}
-          >>> build_arpabet_to_model_vocab_map(vocab)
-          {'AE': 'æ', 'IY': 'i', 'CH': 'tʃ', 'SIL': 'sil', 'R': 'ɹ'}
-
-        Quando usar:
-          * Antes de converter uma sequência ARPAbet (vinda do G2P) para os símbolos aceitos
-            pelo modelo de CTC (IPA/TIMIT).
-          * Em pipelines que precisam de compatibilidade entre G2P (ARPAbet) e o inventário
-            fonético do modelo.
-
-        Quando não usar:
-          * Se seu G2P já produz diretamente os símbolos do vocabulário do modelo.
-          * Se o modelo usa um inventário incompatível (por ex., outra convenção que não IPA/TIMIT).
-
-        Boas práticas:
-          * Verifique se os tokens do seu modelo estão em **lowercase/uppercase** compatível
-            com os candidatos. Os candidatos desta função já estão alinhados aos modelos
-            baseados em TIMIT/IPA comuns em ASR/CTC.
-          * Caso use um modelo com inventário diferente, adapte a lista de candidatos
-            (constante interna) para refletir suas preferências.
-    """
-    present = set(model_vocab.keys())
-    out: Dict[str, str] = {}
-    for arpa, cands in _ARPA_TO_IPA_CANDIDATES.items():
-        for cand in cands:
-            if cand in present:
-                out[arpa] = cand
-                break
-    return out
-
 from typing import List, Dict, Tuple
-
-def map_ref_arpabet_to_model_symbols(ref_arpa_seq: List[str],
-                                     arpa2sym: Dict[str, str]) -> Tuple[List[str], List[str]]:
-    """Converte uma sequência ARPAbet (com stress opcional) para símbolos do modelo.
-
-    Regras:
-      - Remove stress (0–2) no fim do token ARPAbet.
-      - Ignora pausas/ruído (SIL, SPN, NSN) completamente (não entra em mapped, nem em missing).
-      - Se houver mapeamento em `arpa2sym` e o símbolo mapeado for não-fonêmico
-        ("sil", "spn", "nsn"), também ignora.
-      - Mantém a ordem original em `mapped`.
-      - Retorna `missing` como lista única e ordenada (ordem alfabética).
-
-    Args:
-      ref_arpa_seq: lista de tokens ARPAbet possivelmente com stress (ex.: ["AE1","T","ER0","SIL"]).
-      arpa2sym: mapeamento ARPAbet base (sem stress) -> símbolo do vocabulário do modelo.
-
-    Returns:
-      (mapped, missing)
-        mapped: lista de símbolos do modelo (IPA/TIMIT) já sem pausas.
-        missing: bases ARPAbet sem mapeamento, únicas e ordenadas (ex.: ["ER","F"]).
-    """
-    NON_PHONEMIC_BASES = {"SIL", "SPN", "NSN"}
-    NON_PHONEMIC_SYMS  = {"sil", "spn", "nsn"}
-
-    mapped: List[str] = []
-    missing: List[str] = []
-
-    for ph in ref_arpa_seq:
-        base = strip_stress(ph)
-
-        # Ignora completamente pausas/ruído na referência.
-        if base in NON_PHONEMIC_BASES:
-            continue
-
-        sym = arpa2sym.get(base)
-        if sym is None:
-            missing.append(base)
-            continue
-
-        # Mesmo se houver mapeamento, se cair em símbolo não-fonêmico, descarta.
-        if sym in NON_PHONEMIC_SYMS:
-            continue
-
-        mapped.append(sym)
-
-    return mapped, sorted(set(missing))
-
-
 
 # ========================= Correções e normalização =========================
 
@@ -281,101 +169,101 @@ def gop_lr_excluding_self(seg_log_post: np.ndarray, li: int, rival_mask: np.ndar
     return float(np.mean(log_p_l - rival))
 
 
-def expand_diphthongs_if_missing(phones: List[str], model_vocab: Dict[str, int]) -> List[str]:
-    """Expande ditongos *apenas quando o modelo não possui o token composto*.
+# def expand_diphthongs_if_missing(phones: List[str], model_vocab: Dict[str, int]) -> List[str]:
+#     """Expande ditongos *apenas quando o modelo não possui o token composto*.
+#
+#         Muitos vocabulários de ASR/CTC trazem vogais como unidades simples (``"e"``,
+#         ``"ɪ"`` etc.) e **não** incluem o ditongo como um único token (p.ex. ``"eɪ"``).
+#         Esta função detecta ditongos conhecidos e os **divide em duas vogais** somente
+#         se:
+#           1) o ditongo **não** estiver em ``model_vocab``; **e**
+#           2) **ambas** as partes estiverem em ``model_vocab``.
+#
+#         Caso contrário, o símbolo é mantido como veio.
+#
+#         Ditongos suportados (lado esquerdo → partes):
+#           * ``"eɪ" → ["e", "ɪ"]``
+#           * ``"oʊ" → ["o", "ʊ"]``
+#           * ``"aɪ" → ["a", "ɪ"]``
+#           * ``"aʊ" → ["a", "ʊ"]``
+#           * ``"ɔɪ" → ["ɔ", "ɪ"]``
+#
+#         Observações importantes:
+#           * **Não** re-divide símbolos que já existem no vocabulário do modelo. Ex. se
+#             ``"eɪ"`` existir em ``model_vocab``, ele é preservado.
+#           * **Não** cria símbolos novos: se alguma parte do ditongo não existir no
+#             vocabulário (ex.: modelo sem ``"ɔ"``), o ditongo composto é mantido.
+#           * A ordem e o comprimento da sequência podem mudar (quando há expansão),
+#             mas os demais símbolos são preservados.
+#           * A função **não** normaliza equivalências (p.ex. ``ʤ → dʒ``), **não**
+#             filtra pausas/ruído (``sil``, ``spn``, ``nsn``) e **não** verifica
+#             fonotática; ela só trata a expansão de ditongos listados acima.
+#
+#         Args:
+#           phones (List[str]):
+#               Sequência de símbolos alvo já mapeados para o “alfabeto” do modelo
+#               (tipicamente após ``map_ref_arpabet_to_model_symbols``). Pode conter
+#               ditongos e monoftongos.
+#           model_vocab (Dict[str, int]):
+#               Vocabulário do modelo (``token → id``). Usado para checar se o
+#               ditongo e/ou suas partes existem no modelo.
+#
+#         Returns:
+#           List[str]: Nova sequência de símbolos, onde ditongos foram divididos em duas
+#           vogais **somente** quando o token composto faltava no vocabulário mas as
+#           duas partes existiam.
+#
+#         Exemplos:
+#           >>> vocab = {"k":0, "e":1, "ɪ":2, "t":3}            # sem "eɪ"
+#           >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
+#           ['k', 'e', 'ɪ', 't']
+#
+#           >>> vocab = {"k":0, "eɪ":1, "t":2}                  # com "eɪ"
+#           >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
+#           ['k', 'eɪ', 't']
+#
+#           >>> vocab = {"k":0, "ɪ":1, "t":2}                   # sem "e" ⇒ não divide
+#           >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
+#           ['k', 'eɪ', 't']
+#
+#         Quando usar:
+#           * Após mapear ARPAbet → símbolos do modelo, para aumentar a cobertura em
+#             modelos que não possuem tokens de ditongo.
+#
+#         Quando não usar:
+#           * Se o seu modelo já contém todos os ditongos relevantes como tokens únicos.
+#           * Se você precisa de outras normalizações/expansões (essas etapas são
+#             tratadas por outras funções, p.ex. ``normalize_phone_sequence``).
+#
+#         Desempenho:
+#           * Complexidade O(N), com N = número de símbolos em ``phones``.
+#           * Não aloca estruturas grandes; seguro para uso em lote.
+#    """
+#     out: List[str] = []
+#     for ph in phones:
+#         if ph in model_vocab:
+#             out.append(ph)
+#         elif ph in _DIPH_SPLITS:
+#             parts = _DIPH_SPLITS[ph]
+#             if all((p in model_vocab) for p in parts):
+#                 out.extend(parts)
+#             else:
+#                 out.append(ph)
+#         else:
+#             out.append(ph)
+#     return out
 
-        Muitos vocabulários de ASR/CTC trazem vogais como unidades simples (``"e"``,
-        ``"ɪ"`` etc.) e **não** incluem o ditongo como um único token (p.ex. ``"eɪ"``).
-        Esta função detecta ditongos conhecidos e os **divide em duas vogais** somente
-        se:
-          1) o ditongo **não** estiver em ``model_vocab``; **e**
-          2) **ambas** as partes estiverem em ``model_vocab``.
-
-        Caso contrário, o símbolo é mantido como veio.
-
-        Ditongos suportados (lado esquerdo → partes):
-          * ``"eɪ" → ["e", "ɪ"]``
-          * ``"oʊ" → ["o", "ʊ"]``
-          * ``"aɪ" → ["a", "ɪ"]``
-          * ``"aʊ" → ["a", "ʊ"]``
-          * ``"ɔɪ" → ["ɔ", "ɪ"]``
-
-        Observações importantes:
-          * **Não** re-divide símbolos que já existem no vocabulário do modelo. Ex. se
-            ``"eɪ"`` existir em ``model_vocab``, ele é preservado.
-          * **Não** cria símbolos novos: se alguma parte do ditongo não existir no
-            vocabulário (ex.: modelo sem ``"ɔ"``), o ditongo composto é mantido.
-          * A ordem e o comprimento da sequência podem mudar (quando há expansão),
-            mas os demais símbolos são preservados.
-          * A função **não** normaliza equivalências (p.ex. ``ʤ → dʒ``), **não**
-            filtra pausas/ruído (``sil``, ``spn``, ``nsn``) e **não** verifica
-            fonotática; ela só trata a expansão de ditongos listados acima.
-
-        Args:
-          phones (List[str]):
-              Sequência de símbolos alvo já mapeados para o “alfabeto” do modelo
-              (tipicamente após ``map_ref_arpabet_to_model_symbols``). Pode conter
-              ditongos e monoftongos.
-          model_vocab (Dict[str, int]):
-              Vocabulário do modelo (``token → id``). Usado para checar se o
-              ditongo e/ou suas partes existem no modelo.
-
-        Returns:
-          List[str]: Nova sequência de símbolos, onde ditongos foram divididos em duas
-          vogais **somente** quando o token composto faltava no vocabulário mas as
-          duas partes existiam.
-
-        Exemplos:
-          >>> vocab = {"k":0, "e":1, "ɪ":2, "t":3}            # sem "eɪ"
-          >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
-          ['k', 'e', 'ɪ', 't']
-
-          >>> vocab = {"k":0, "eɪ":1, "t":2}                  # com "eɪ"
-          >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
-          ['k', 'eɪ', 't']
-
-          >>> vocab = {"k":0, "ɪ":1, "t":2}                   # sem "e" ⇒ não divide
-          >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
-          ['k', 'eɪ', 't']
-
-        Quando usar:
-          * Após mapear ARPAbet → símbolos do modelo, para aumentar a cobertura em
-            modelos que não possuem tokens de ditongo.
-
-        Quando não usar:
-          * Se o seu modelo já contém todos os ditongos relevantes como tokens únicos.
-          * Se você precisa de outras normalizações/expansões (essas etapas são
-            tratadas por outras funções, p.ex. ``normalize_phone_sequence``).
-
-        Desempenho:
-          * Complexidade O(N), com N = número de símbolos em ``phones``.
-          * Não aloca estruturas grandes; seguro para uso em lote.
-   """
-    out: List[str] = []
-    for ph in phones:
-        if ph in model_vocab:
-            out.append(ph)
-        elif ph in _DIPH_SPLITS:
-            parts = _DIPH_SPLITS[ph]
-            if all((p in model_vocab) for p in parts):
-                out.extend(parts)
-            else:
-                out.append(ph)
-        else:
-            out.append(ph)
-    return out
-
-_EQUIV_PHONES = {
-    "ʧ": "tʃ",
-    "ʤ": "dʒ",
-    "ɡ": "g",
-    "r": "ɹ",
-    "ɚ": "ɝ",
-    # "ɜ": "ə",
-}
+# _EQUIV_PHONES = {
+#     "ʧ": "tʃ",
+#     "ʤ": "dʒ",
+#     "ɡ": "g",
+#     "r": "ɹ",
+#     "ɚ": "ɝ",
+#     # "ɜ": "ə",
+# }
 
 def normalize_phone_symbol(p: str) -> str:
-    return _EQUIV_PHONES.get(p, p)
+    return p #_EQUIV_PHONES.get(p, p)
 
 def normalize_phone_sequence(seq: List[str]) -> List[str]:
     return [normalize_phone_symbol(p) for p in seq]
@@ -1566,6 +1454,234 @@ def _pause_stats(is_pause_trim: np.ndarray, sr_frames_hz: float,
 #     return fluency_basic, fluency_details
 #
 
+def _entropy_from_logpost(seg_log_post: np.ndarray) -> float:
+    """
+    Entropia média dos pós-termos em um segmento (log-posteriors -> prob).
+    Retorna 0.0 se o segmento for vazio.
+    """
+    if seg_log_post.size == 0:
+        return 0.0
+    P = np.exp(seg_log_post)  # [L,V], já soma 1 por frame
+    # Evita log(0) com clip bem pequeno
+    P = np.clip(P, 1e-12, 1.0)
+    H = -np.sum(P * np.log(P), axis=1)  # [L]
+    return float(np.mean(H))
+
+def _flip_rate(argmax_ids: np.ndarray, fps: float) -> float:
+    """
+    Mudanças de rótulo por segundo (apenas entre frames consecutivos).
+    """
+    if argmax_ids.size <= 1 or fps <= 0:
+        return 0.0
+    flips = np.count_nonzero(np.diff(argmax_ids) != 0)
+    dur_s = argmax_ids.size / fps
+    return float(flips / max(dur_s, 1e-6))
+
+def _word_frame_span_from_phones(word_item: dict) -> Optional[Tuple[int,int]]:
+    """
+    A partir de word_item['phones'] (com t1,t2), devolve (t1_min, t2_max) em frames.
+    Retorna None se não houver phones com limites válidos.
+    """
+    spans = [(int(p.get("t1", -1)), int(p.get("t2", -1))) for p in (word_item.get("phones") or [])]
+    spans = [(a,b) if (a >= 0 and b >= 0 and b >= a) else None for (a,b) in spans]
+    spans = [s for s in spans if s is not None]
+    if not spans:
+        return None
+    t1 = min(a for a,_ in spans)
+    t2 = max(b for _,b in spans)
+    return (t1, t2)
+
+def _duration_z_scores_per_word(word_item: dict, frames_to_ms: float) -> List[float]:
+    """
+    Calcula z-score de duração por fone usando μ/σ simples por CLASSE:
+      vogais: μ=100ms, σ=35ms; consoantes: μ=60ms, σ=25ms.
+    Se um fone não tiver classe conhecida, usa μ=80ms, σ=30ms.
+    Retorna lista de |z| por fone (para depois fazer média).
+    """
+    mu_v, sd_v = 100.0, 35.0
+    mu_c, sd_c = 60.0, 25.0
+    mu_u, sd_u = 80.0, 30.0
+
+    out = []
+    for p in (word_item.get("phones") or []):
+        t1, t2 = int(p.get("t1", -1)), int(p.get("t2", -1))
+        if t1 < 0 or t2 < 0 or t2 < t1:
+            continue
+        dur_ms = (t2 - t1 + 1) * frames_to_ms
+        ph = p.get("phone", "")
+        cls = is_vowel(ph)
+        if cls is True:
+            mu, sd = mu_v, sd_v
+        elif cls is False:
+            mu, sd = mu_c, sd_c
+        else:
+            mu, sd = mu_u, sd_u
+        z = 0.0 if sd <= 1e-6 else (dur_ms - mu) / sd
+        out.append(abs(float(z)))
+    return out
+
+def _intra_word_pause_ms(is_pause: np.ndarray, t1: int, t2: int, fps: float) -> float:
+    """
+    Soma de pausas (frames True) dentro do intervalo [t1,t2] em milissegundos.
+    """
+    if is_pause.size == 0 or t1 < 0 or t2 < 0 or t2 < t1:
+        return 0.0
+    sub = is_pause[max(0, t1):min(is_pause.size, t2+1)]
+    return float(sub.sum() / max(fps, 1e-6) * 1000.0)
+
+def _micro_fluency(words_out: List[dict],
+                   log_post: np.ndarray,
+                   phone_argmax_ids: np.ndarray,
+                   is_pause: np.ndarray,
+                   frames_per_sec: float) -> Tuple[dict, float]:
+    """
+    Calcula métricas de micro-fluência por palavra e um score agregado (0–1).
+    Retorna (details_dict, micro_score_overall).
+    """
+    # Normalizadores/limiares
+    H_MAX = 4.0       # entropia ~ log(V_eff); 4 é um cap razoável p/ vocabulários de fones
+    FLIP_CAP = 15.0   # flips/seg onde penalidade satura
+    INTRA_PAUSE_CAP = 300.0  # ms para saturar penalidade
+    frames_to_ms = 1000.0 / max(frames_per_sec, 1e-6)
+
+    per_word = []
+    scores = []
+
+    for w in words_out:
+        span = _word_frame_span_from_phones(w)
+        if span is None:
+            # Sem limites por fone → pula (ou usa tudo)
+            t1, t2 = 0, min(log_post.shape[0]-1, int(round(0.4*log_post.shape[0])))
+        else:
+            t1, t2 = span
+
+        seg_lp = log_post[max(0,t1):min(log_post.shape[0], t2+1), :]
+        seg_amax = phone_argmax_ids[max(0,t1):min(len(phone_argmax_ids), t2+1)]
+        seg_pause = is_pause[max(0,t1):min(is_pause.size, t2+1)]
+        seg_speech = ~seg_pause
+
+        # Entropia média em fala (se não houver fala, cai para o segmento bruto)
+        if seg_speech.any():
+            H = _entropy_from_logpost(seg_lp[seg_speech])
+            amax = seg_amax[seg_speech]
+            fps_local = frames_per_sec
+        else:
+            H = _entropy_from_logpost(seg_lp)
+            amax = seg_amax
+            fps_local = frames_per_sec
+
+        flips = _flip_rate(amax.astype(int), fps_local) if amax.size else 0.0
+        z_list = _duration_z_scores_per_word(w, frames_to_ms)
+        mean_abs_z = float(np.mean(z_list)) if z_list else 0.0
+        pause_ms = _intra_word_pause_ms(is_pause, t1, t2, frames_per_sec)
+
+        # Componentes em [0,1] (↑ melhor)
+        s_gop = float(w.get("word_score_gop", 0.0))              # já em [0,1] no seu pipeline
+        s_ent = 1.0 - min(1.0, H / H_MAX)
+        s_flip = 1.0 - min(1.0, flips / FLIP_CAP)
+        s_dur = 1.0 - min(1.0, (mean_abs_z / 2.0))                # |z|≈2 → penalidade máxima
+
+        # Agregação (pesos podem ser ajustados conforme validação)
+        score = 0.40*s_gop + 0.25*s_ent + 0.20*s_dur + 0.15*s_flip
+        penalty = 1.0 - min(1.0, pause_ms / INTRA_PAUSE_CAP)
+        score = float(max(0.0, min(1.0, score * penalty)))
+
+        per_word.append({
+            "target_word": w.get("target_word",""),
+            "micro": {
+                "entropy_mean": round(H, 4),
+                "flip_rate_hz": round(flips, 3),
+                "mean_abs_duration_z": round(mean_abs_z, 3),
+                "intra_word_pause_ms": round(pause_ms, 1),
+                "s_gop": round(s_gop, 3),
+                "s_ent": round(s_ent, 3),
+                "s_flip": round(s_flip, 3),
+                "s_dur": round(s_dur, 3),
+                "score": round(score, 3),
+            }
+        })
+        scores.append(score)
+
+    overall = float(np.mean(scores)) if scores else 0.0
+    details = {"per_word": per_word, "score_overall": round(overall, 3)}
+    return details, overall
+
+# ===== Helpers p/ score numérico de fluência =====
+# def _clip01(x: float) -> float:
+#     return float(max(0.0, min(1.0, x)))
+#
+# def _norm_up(x: float, lo: float, hi: float) -> float:
+#     """Mapeia x para [0,1] assumindo que 'lo' é ruim e 'hi' é bom (satura fora)."""
+#     if hi <= lo: return 0.0
+#     return _clip01((x - lo) / (hi - lo))
+#
+# def _norm_down(x: float, lo: float, hi: float) -> float:
+#     """Mapeia x para [0,1] quando valores menores são melhores (ex.: pausa)."""
+#     # equivale a 1 - _norm_up(x, lo, hi)
+#     return 1.0 - _norm_up(x, lo, hi)
+#
+# def _macro_fluency_score(words_per_sec: float,
+#                          pause_ratio_full: float,
+#                          articulation_rate_syll_per_sec: float) -> float:
+#     """
+#     Constrói um score de 0–1 com 3 componentes normalizados:
+#       - taxa de palavras (bom ~ 2.5–3.5 wps)
+#       - pausa (bom ~ <=0.15, ruim ~ >=0.40)
+#       - articulation rate (bom ~ 3.5–6.0 sílabas/s)
+#     Pesos dão ênfase a pausas e taxa.
+#     """
+#
+#
+#
+#     s_rate  = _norm_up(words_per_sec, lo=1.0, hi=3.0)               # 1→0, 3→1
+#     s_pause = _norm_down(pause_ratio_full, lo=0.15, hi=0.40)        # 0.40→0, 0.15→1
+#     s_artic = _norm_up(articulation_rate_syll_per_sec, lo=2.0, hi=6.0)
+#
+#     print("words_per_sec", s_rate)
+#     print("pause_ratio_full", s_pause)
+#     print("articulation_rate_syll_per_sec", s_artic)
+#
+#     # pesos (ajustáveis): pausas têm maior impacto
+#     w_rate, w_pause, w_artic = 0.45, 0.20, 0.35
+#     score = _clip01(w_rate*s_rate + w_pause*s_pause + w_artic*s_artic) #
+#     # comps = {
+#     #     "s_rate": round(s_rate, 3),
+#     #     "s_pause": round(s_pause, 3),
+#     #     "s_artic": round(s_artic, 3),
+#     #     "weights": {"rate": w_rate, "pause": w_pause, "artic": w_artic}
+#     # }
+#     return score
+
+def _norm01_from_range(x, lo, hi):
+    if hi <= lo: return 0.0
+    return float(max(0.0, min(1.0, (x - lo) / (hi - lo))))
+
+def _macro_fluency_score(words_per_sec_pruned: float,
+                            pause_ratio_full: float,
+                            articulation_rate_syll_per_sec: float,
+                            ranges: dict = None):
+    """
+    ranges: optional dict with keys 'rate_lo','rate_hi','pause_lo','pause_hi','art_lo','art_hi'
+    If ranges is None use sensible defaults (but better: compute from corpus percentiles).
+    """
+    if ranges is None:
+        ranges = {
+            "rate_lo": 1.0, "rate_hi": 3.0,      # pruned words/sec
+            "pause_lo": 0.15, "pause_hi": 0.65, # pause ratio (silent)
+            "art_lo": 2.5, "art_hi": 6.0,       # syl/sec (articulation)
+        }
+
+
+    s_rate  = _norm01_from_range(words_per_sec_pruned, ranges["rate_lo"], ranges["rate_hi"])
+    s_pause = 1.0 - _norm01_from_range(pause_ratio_full, ranges["pause_lo"], ranges["pause_hi"])
+    s_artic = _norm01_from_range(articulation_rate_syll_per_sec, ranges["art_lo"], ranges["art_hi"])
+
+    # pesos: idealmente aprendidos; aqui pesos balanceados como exemplo
+    w_rate, w_pause, w_artic = 0.50, 0.40, 0.2
+    score_raw = w_rate*s_rate + w_pause*s_pause + w_artic*s_artic
+    return float(max(0.0, min(1.0, score_raw)))
+
+
 def compute_fluency(audio: np.ndarray, log_post: np.ndarray, tok2id: dict,
                     words_out: List[dict], ref_phones_all: List[str],
                     phone_argmax_ids: List[int], blank_id: int,
@@ -1582,10 +1698,10 @@ def compute_fluency(audio: np.ndarray, log_post: np.ndarray, tok2id: dict,
     vad_pause = ~vad_speech
     is_pause = model_pause | vad_pause
 
-    # --- métricas “de cobertura” no trecho inteiro ---
+    # --- métricas “full” (para frases longas) ---
     pause_ratio_full = float(np.mean(is_pause)) if is_pause.size > 0 else 0.0
 
-    # --- recorte para métricas baseadas em fala efetiva (p.ex. articulation rate) ---
+    # --- recorte para métricas baseadas em fala ---
     if trim_silence:
         speech_mask = ~is_pause
         trimmed_speech, i1, i2 = _trim_leading_trailing(speech_mask)
@@ -1600,24 +1716,15 @@ def compute_fluency(audio: np.ndarray, log_post: np.ndarray, tok2id: dict,
         is_pause_trim = is_pause
         dur_trim_s = dur_full_s
 
-    # --- taxas globais por segundo usam a duração total (alinha com o teste) ---
+    # --- taxas globais (sempre definidas) ---
     n_words = len(words_out)
     n_ref_phones = len(ref_phones_all)
     duration_s = max(dur_full_s, 1e-6)
     words_per_sec = n_words / duration_s
     phones_per_sec = n_ref_phones / duration_s
-
-    # nível de fluência baseado nas métricas “cheias”
-    if words_per_sec >= 2.4 and pause_ratio_full <= 0.25:
-        level = "high"
-    elif words_per_sec >= 1.5 and pause_ratio_full <= 0.30:
-        level = "medium"
-    else:
-        level = "low"
-
     wpm = words_per_sec * 60.0
 
-    # articulation rate baseado no tempo de fala **dentro do recorte**
+    # --- articulation rate baseado no tempo de fala (recortado) ---
     if is_pause_trim.size > 0:
         speech_frames = int((~is_pause_trim).sum())
         speech_time_s = (dur_trim_s if dur_trim_s > 0 else duration_s) * (speech_frames / max(is_pause_trim.size, 1))
@@ -1626,28 +1733,155 @@ def compute_fluency(audio: np.ndarray, log_post: np.ndarray, tok2id: dict,
     total_syll = sum(int(w.get("syllables", 1)) for w in words_out)
     articulation_rate = (total_syll / max(speech_time_s, 1e-6)) if total_syll > 0 else 0.0
 
+    # --- base de frames/seg para estatísticas ---
     frames_per_sec = (is_pause_trim.size / max(dur_trim_s, 1e-6)) if (dur_trim_s > 0 and is_pause_trim.size > 0) \
                      else (is_pause.size / max(duration_s, 1e-6) if is_pause.size > 0 else 0.0)
     pause_ext = _pause_stats(is_pause_trim, frames_per_sec if frames_per_sec>0 else 1.0, words_out, [])
 
-    filler_words = [w.get("target_word","") for w in words_out if w.get("target_word","") in ("uh","um")]
+    # --- MODO MICRO-FLUÊNCIA: ativa se fala for curta ---
+    short_utterance = (n_words <= 2) or (dur_full_s < 1.0)
+    micro_details = None
+    micro_score = None
+    if short_utterance:
+        micro_details, micro_score = _micro_fluency(
+            words_out=words_out,
+            log_post=log_post,
+            phone_argmax_ids=np.array(phone_argmax_ids, dtype=int),
+            is_pause=is_pause,
+            frames_per_sec=float(frames_per_sec if frames_per_sec>0 else (T / max(duration_s,1e-6)))
+        )
 
+    # --- nível de fluência ---
+    if short_utterance and micro_score is not None:
+        # limiares simples sugeridos para curtas
+        fluency_score = micro_score
+        if micro_score >= 0.80:
+            level = "high"
+        elif micro_score >= 0.60:
+            level = "medium"
+        else:
+            level = "low"
+    else:
+        # heurística global original
+
+        fluency_score = _macro_fluency_score(words_per_sec, pause_ratio_full, articulation_rate)
+
+        # articulation_rate, words_per_sec, pause_ratio_full
+        if words_per_sec >= 2.4 and pause_ratio_full <= 0.25:
+            level = "high"
+        elif words_per_sec >= 1.5 and pause_ratio_full <= 0.30:
+            level = "medium"
+        else:
+            level = "low"
+
+    # --- montar saídas ---
     fluency_basic = {
-        "duration_s": float(dur_full_s),        # <<< duração total (0.5 s no teste)
+        "duration_s": float(dur_full_s),
         "words_per_sec": float(words_per_sec),
         "phones_per_sec": float(phones_per_sec),
-        "pause_ratio": float(pause_ratio_full), # <<< pausa no trecho inteiro (~0.5 no teste)
+        "pause_ratio": float(pause_ratio_full),
         "level": level,
+        "fluency_score": fluency_score,
     }
 
     fluency_details = {
         "wpm": float(wpm),
         "articulation_rate_syll_per_sec": float(articulation_rate),
         **pause_ext,
-        "fillers": {"count": int(len(filler_words)), "examples": filler_words[:5]},
+        "fillers": {
+            "count": int(len([w.get("target_word","") for w in words_out if w.get("target_word","") in ("uh","um")])),
+            "examples": [w.get("target_word","") for w in words_out if w.get("target_word","") in ("uh","um")][:5],
+        },
     }
 
+    # anexa micro-detalhes quando aplicável
+    if micro_details is not None:
+        fluency_details["micro_fluency"] = micro_details
+
     return fluency_basic, fluency_details
+
+# def compute_fluency(audio: np.ndarray, log_post: np.ndarray, tok2id: dict,
+#                     words_out: List[dict], ref_phones_all: List[str],
+#                     phone_argmax_ids: List[int], blank_id: int,
+#                     trim_silence: bool = True) -> Tuple[dict, dict]:
+#     T, V = log_post.shape
+#     dur_full_s = float(len(audio) / 16000.0) if len(audio) > 0 else 0.0
+#
+#     argm = np.array(phone_argmax_ids, dtype=int)
+#     sil_ids = [tok2id[t] for t in ("sil","spn","nsn") if t in tok2id]
+#     model_pause = np.isin(argm, sil_ids) if len(sil_ids) > 0 else np.zeros(T, dtype=bool)
+#
+#     am, zcr = _approx_frame_energy_and_zcr(audio, T)
+#     vad_speech = _vad_mask_from_energy(am, zcr)
+#     vad_pause = ~vad_speech
+#     is_pause = model_pause | vad_pause
+#
+#     # --- métricas “de cobertura” no trecho inteiro ---
+#     pause_ratio_full = float(np.mean(is_pause)) if is_pause.size > 0 else 0.0
+#
+#     # --- recorte para métricas baseadas em fala efetiva (p.ex. articulation rate) ---
+#     if trim_silence:
+#         speech_mask = ~is_pause
+#         trimmed_speech, i1, i2 = _trim_leading_trailing(speech_mask)
+#         if i2 >= i1:
+#             is_pause_trim = ~trimmed_speech
+#             T_trim = i2 - i1 + 1
+#             dur_trim_s = dur_full_s * (T_trim / max(T, 1))
+#         else:
+#             is_pause_trim = np.zeros(0, dtype=bool)
+#             dur_trim_s = 0.0
+#     else:
+#         is_pause_trim = is_pause
+#         dur_trim_s = dur_full_s
+#
+#     # --- taxas globais por segundo usam a duração total (alinha com o teste) ---
+#     n_words = len(words_out)
+#     n_ref_phones = len(ref_phones_all)
+#     duration_s = max(dur_full_s, 1e-6)
+#     words_per_sec = n_words / duration_s
+#     phones_per_sec = n_ref_phones / duration_s
+#
+#     # nível de fluência baseado nas métricas “cheias”
+#     if words_per_sec >= 2.4 and pause_ratio_full <= 0.25:
+#         level = "high"
+#     elif words_per_sec >= 1.5 and pause_ratio_full <= 0.30:
+#         level = "medium"
+#     else:
+#         level = "low"
+#
+#     wpm = words_per_sec * 60.0
+#
+#     # articulation rate baseado no tempo de fala **dentro do recorte**
+#     if is_pause_trim.size > 0:
+#         speech_frames = int((~is_pause_trim).sum())
+#         speech_time_s = (dur_trim_s if dur_trim_s > 0 else duration_s) * (speech_frames / max(is_pause_trim.size, 1))
+#     else:
+#         speech_time_s = duration_s
+#     total_syll = sum(int(w.get("syllables", 1)) for w in words_out)
+#     articulation_rate = (total_syll / max(speech_time_s, 1e-6)) if total_syll > 0 else 0.0
+#
+#     frames_per_sec = (is_pause_trim.size / max(dur_trim_s, 1e-6)) if (dur_trim_s > 0 and is_pause_trim.size > 0) \
+#                      else (is_pause.size / max(duration_s, 1e-6) if is_pause.size > 0 else 0.0)
+#     pause_ext = _pause_stats(is_pause_trim, frames_per_sec if frames_per_sec>0 else 1.0, words_out, [])
+#
+#     filler_words = [w.get("target_word","") for w in words_out if w.get("target_word","") in ("uh","um")]
+#
+#     fluency_basic = {
+#         "duration_s": float(dur_full_s),        # <<< duração total (0.5 s no teste)
+#         "words_per_sec": float(words_per_sec),
+#         "phones_per_sec": float(phones_per_sec),
+#         "pause_ratio": float(pause_ratio_full), # <<< pausa no trecho inteiro (~0.5 no teste)
+#         "level": level,
+#     }
+#
+#     fluency_details = {
+#         "wpm": float(wpm),
+#         "articulation_rate_syll_per_sec": float(articulation_rate),
+#         **pause_ext,
+#         "fillers": {"count": int(len(filler_words)), "examples": filler_words[:5]},
+#     }
+#
+#     return fluency_basic, fluency_details
 
 
 # ========================= PER estratificado/posição + IC =========================
@@ -1782,7 +2016,7 @@ class PronEvaluator:
         escopo de rivais usado no cálculo do GOP.
 
         Args:
-          model_id (str, padrão: "vitouphy/wav2vec2-xls-r-300m-timit-phoneme"):
+          model_id (str):
               ID do modelo Hugging Face (CTC) já treinado em fonemas. **Use** este padrão para
               inglês/TIMIT. **Troque** apenas se você tiver um tokenizer compatível (mesmos símbolos
               de fonemas) ou um modelo fine-tunado equivalente. **Não usar** um modelo de palavras
@@ -1867,7 +2101,7 @@ class PronEvaluator:
           0.82  # ~exemplo
     """
     def __init__(self,
-                 model_id: str = "vitouphy/wav2vec2-xls-r-300m-timit-phoneme",
+                 model_id: str = "bobboyms/wav2vec2-base-en-phoneme-ctc-41h", #"vitouphy/wav2vec2-xls-r-300m-timit-phoneme",
                  device: Optional[str] = None,
                  min_frames_per_phone: int = 2,
                  gop_thresholds: Optional[Dict[str, float]] = None,
@@ -1882,7 +2116,6 @@ class PronEvaluator:
             self.device = torch.device(device)
         else:
             if torch.backends.mps.is_available():
-                print("MPS available")
                 self.device = torch.device("mps")
             elif torch.cuda.is_available():
                 self.device = torch.device("cuda")
@@ -1891,6 +2124,7 @@ class PronEvaluator:
 
         # Carrega processor/modelo uma única vez
         self.processor = AutoProcessor.from_pretrained(model_id)
+        print("model_id:", model_id)
         base_model = AutoModelForCTC.from_pretrained(model_id)
 
         # torch.compile (quando disponível) pode dar ganho em CPU/CUDA
@@ -1907,7 +2141,7 @@ class PronEvaluator:
 
         self.blank_id = getattr(self.processor.tokenizer, "pad_token_id", 0)
 
-        self.arpa2sym = build_arpabet_to_model_vocab_map(self.vocab)
+        # self.arpa2sym = build_arpabet_to_model_vocab_map(self.vocab)
         self.ignore_tokens = {"|", "<s>", "</s>", " ", "sil", "spn", "nsn"}
 
         self.min_frames_per_phone = max(1, int(min_frames_per_phone))
@@ -2102,22 +2336,27 @@ class PronEvaluator:
         hyp_tokens = self._ids_to_tokens(hyp_ids_collapsed)
         hyp_phones_all = [t for t in hyp_tokens if t and (t not in self.ignore_tokens)]
         hyp_phones_all = filter_non_phonemic(hyp_phones_all)
-        hyp_phones_all = normalize_phone_sequence(hyp_phones_all)
+        # hyp_phones_all = normalize_phone_sequence(hyp_phones_all)
 
         # ---------- REF (fonemas alvo) ----------
-        words = tokenize_words(target_text)
-        ref_arpa_by_word: List[List[str]] = [g2p_arpabet_tokens(w) for w in words]
+        words = _tokenize_words(target_text)
+        # phonemizer retorna 1 string por palavra, com fones separados por espaço
+        ph_strings_by_word: List[str] = _phonemize_words_with_cache(words)
+
         ref_phones_by_word: List[List[str]] = []
-        for arpa_seq in ref_arpa_by_word:
-            mapped, _missing = map_ref_arpabet_to_model_symbols(arpa_seq, self.arpa2sym)
-            mapped = expand_diphthongs_if_missing(mapped, self.tok2id)
-            mapped = filter_non_phonemic(mapped)
-            mapped = normalize_phone_sequence(mapped)
-            ref_phones_by_word.append(mapped)
+        for ph_str in ph_strings_by_word:
+            # split em fones + remoção de marcas de acento/comprimento
+            toks = (ph_str.split() if ph_str else [])
+            # filtra tokens não-fonêmicos, normaliza equivalências (ʤ→dʒ etc.)
+            toks = filter_non_phonemic(toks)
+            toks = normalize_phone_sequence(toks)
+            # expande ditongos somente se necessário (quando modelo não tem eɪ/oʊ/etc.)
+            # toks = expand_diphthongs_if_missing(toks, self.tok2id)
+            ref_phones_by_word.append(toks)
 
         # concat REF + spans
         ref_phones_all: List[str] = []
-        ref_word_spans: List[Tuple[int,int]] = []
+        ref_word_spans: List[Tuple[int, int]] = []
         cursor = 0
         for phs in ref_phones_by_word:
             start = cursor
@@ -2439,106 +2678,7 @@ class PronEvaluator:
         }
 
 
-# ========================= Singleton do serviço =========================
 
-gop_thresholds = {
-    # ================= VOGAIS MONOFTONGOS =================
-    "i":  0.12,  # alta, anterior (estável)
-    "ɪ":  0.10,
-    "e":  0.10,  # se existir como monoftongo no vocabulário
-    "ɛ":  0.10,
-    "æ":  0.08,  # mais difícil p/ L2
-    "ɑ":  0.12,
-    "ʌ":  0.10,
-    "ə":  0.08,  # schwa é instável (mais permissivo)
-    "ɝ":  0.07,  # rótica é difícil — mais permissivo
-    "ɔ":  0.09,
-    "ʊ":  0.08,  # curta e confusável
-    "u":  0.12,
-
-    # ================= DITONGOS =================
-    "eɪ": 0.09,
-    "oʊ": 0.09,
-    "aɪ": 0.08,
-    "aʊ": 0.08,
-    "ɔɪ": 0.08,
-
-    # ================= STOPS =================
-    "p": 0.10, "b": 0.10,
-    "t": 0.10, "d": 0.10,
-    "k": 0.10, "g": 0.10, "ɡ": 0.10,  # g/ɡ mapeiam para o mesmo
-
-    # ================= AFRICADAS =================
-    "tʃ": 0.08,
-    "dʒ": 0.08, "ʤ": 0.08,  # normalização cobre ambas
-
-    # ================= FRICATIVAS =================
-    "f": 0.09, "v": 0.09,
-    "θ": 0.07, "ð": 0.07,  # difíceis p/ L2 → mais permissivo
-    "s": 0.10, "z": 0.10,
-    "ʃ": 0.09, "ʒ": 0.08,
-    "h": 0.08,
-
-    # ================= NASAIS =================
-    "m": 0.10, "n": 0.10, "ŋ": 0.10,
-
-    # ================= LÍQUIDAS / APROXIMANTES =================
-    "l": 0.09,
-    "ɹ": 0.07,  # /r/ americano é difícil
-    "w": 0.09,
-    "j": 0.09,
-
-    # (tokens não-fonêmicos como "sil"/"spn"/"nsn" não recebem threshold)
-}
-gop_thresholds = {
-    # ================= VOGAIS MONOFTONGOS =================
-    "i":  0.12,  # alta, anterior (estável)
-    "ɪ":  0.10,
-    "e":  0.10,  # se existir como monoftongo no vocabulário
-    "ɛ":  0.10,
-    "æ":  0.08,  # mais difícil p/ L2
-    "ɑ":  0.12,
-    "ʌ":  0.10,
-    "ə":  0.08,  # schwa é instável (mais permissivo)
-    "ɝ":  0.07,  # rótica é difícil — mais permissivo
-    "ɔ":  0.09,
-    "ʊ":  0.08,  # curta e confusável
-    "u":  0.12,
-
-    # ================= DITONGOS =================
-    "eɪ": 0.09,
-    "oʊ": 0.09,
-    "aɪ": 0.08,
-    "aʊ": 0.08,
-    "ɔɪ": 0.08,
-
-    # ================= STOPS =================
-    "p": 0.10, "b": 0.10,
-    "t": 0.10, "d": 0.10,
-    "k": 0.10, "g": 0.10, "ɡ": 0.10,  # g/ɡ mapeiam para o mesmo
-
-    # ================= AFRICADAS =================
-    "tʃ": 0.08,
-    "dʒ": 0.08, "ʤ": 0.08,  # normalização cobre ambas
-
-    # ================= FRICATIVAS =================
-    "f": 0.09, "v": 0.09,
-    "θ": 0.07, "ð": 0.07,  # difíceis p/ L2 → mais permissivo
-    "s": 0.10, "z": 0.10,
-    "ʃ": 0.09, "ʒ": 0.08,
-    "h": 0.08,
-
-    # ================= NASAIS =================
-    "m": 0.10, "n": 0.10, "ŋ": 0.10,
-
-    # ================= LÍQUIDAS / APROXIMANTES =================
-    "l": 0.09,
-    "ɹ": 0.07,  # /r/ americano é difícil
-    "w": 0.09,
-    "j": 0.09,
-
-    # (tokens não-fonêmicos como "sil"/"spn"/"nsn" não recebem threshold)
-}
 
 _SERVICE_SINGLETON: Optional[PronEvaluator] = None
 
@@ -2850,77 +2990,34 @@ def gerar_feedback_pronuncia(
 
 # ========================= Execução direta =========================
 
-from typing import List, Dict, Any
-
-
-
-def weighted_word_accuracy(words: List[Dict[str, Any]],
-                           weights: Dict[str, float] = {"perfect": 1.0, "high": 0.80, "medium": 0.5, "low":0.0}) -> float:
-
-    if not words:
-        return 0.0
-    score_sum = 0.0
-    for w in words:
-        lvl = (w.get("pronunciation_quality") or "").lower()
-        score_sum += weights.get(lvl, 0.0)  # desconhecidos contam como 0.0
-    return score_sum / len(words)
-
-def formater_output(data,
-    weight_per: float = 0.6,
-    weight_gop: float = 0.4,
-    ops_penalty: float = 0.05,
-                    ):
-    # t_medium, t_low = (0.70, 0.85)
-    thresholds4 = (0.90, 0.80, 0.70)
+def formater_output(data):
     intelligibility = float(data.get("intelligibility", 0))
-    # war = float(data.get("word_accuracy_rate", 0))
+    war = float(data.get("word_accuracy_rate", 0))
     fluency_level = data.get("fluency", {}).get("level", None)
+    fluency_score = data.get("fluency", {}).get("fluency_score", 0.0)
+
+    print("fluency_score", fluency_score)
 
     words_raw = data.get("words", [])
     words = []
     for w in words_raw:
-        per = float(w.get("word_score_per", 0.0))
-        gop = float(w.get("word_score_gop", 0.0))
-        ops =  list(filter(lambda op: op != "match", w.get("per_ops", [])))
 
-        if len(ops) == 0 and per == 1.0:
-            gop = 1.0
-
-        score = weight_per * per + weight_gop * gop
-
-        # penalty for deletions/insertions (more critical for intelligibility)
-        n_penalized_ops = sum(1 for op in ops if op.startswith("del(") or op.startswith("ins("))
-        score -= min(n_penalized_ops * ops_penalty, 0.15)
-
-        # clamp to [0, 1]
-        score = max(0.0, min(1.0, score))
-
-        t_perfect, t_high, t_medium = thresholds4
-
-        if score >= t_perfect:
-            cls = "perfect"
-        elif score >= t_high:
-            cls = "high"
-        elif score >= t_medium:
-            cls = "medium"
-        else:
-            cls = "low"
-
+        ops = w.get("per_ops", []) or []
         words.append({
             "target_word": w.get("target_word"),
             "target_phones": w.get("target_phones",[]),
             "produced_phone": w.get("produced_phone",[]),
-            "per": per,
-            "gop": gop,
-            "ops": ops,
-            "pronunciation_quality":cls,
+            "per": float(w.get("word_score_per", 0.0)),
+            "gop": float(w.get("word_score_gop", 0.0)),
+            "ops": list(filter(lambda op: op != "match", ops))
         })
 
 
     return {
         "intelligibility": intelligibility,
-        "word_accuracy_rate": weighted_word_accuracy(words),
+        "word_accuracy_rate": war,
         "fluency_level": fluency_level,
+        "fluency_score": fluency_score,
         "words": words,
     }
 
@@ -2928,7 +3025,7 @@ def formater_output(data,
 if __name__ == "__main__":
     service = get_pron_service()
     # "meu_audio.wav" "audio.mp3"
-    result = service.evaluate("meu_audio.wav", "She looked guilty after lying to her friend")
+    result = service.evaluate("audio.mp3", "She look guilty after lying to her friend")
 
     data = formater_output(result["sentence_metrics"])
     print(data)

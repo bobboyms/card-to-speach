@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from supermemo2 import first_review, review
 
 from app.repositories import DeckRepository, CardRepository
+from app.services.text_to_speech import TextToSpeach
 from app.time_utils import utc_now
 from app.schemas import (
     DeckCreate,
@@ -22,6 +23,7 @@ from app.schemas import (
     CardsPage,
     ReviewOut,
 )
+from app.utils.b64 import mp3_to_base64
 from app.utils.decks import normalize_deck_type
 
 BUTTON_TO_GRADE = {"again": 0, "hard": 3, "good": 4, "easy": 5}
@@ -126,12 +128,14 @@ class CardService:
         self,
         repo: CardRepository,
         deck_service: DeckService,
+        text_speech_service: TextToSpeach,
         utc_now: Callable[[], datetime],
     ):
         """Store dependencies required to manage cards."""
         self._repo = repo
         self._deck_service = deck_service
         self._utc_now = utc_now
+        self._text_speech_service = text_speech_service
 
     @staticmethod
     def _require_card_public_id(
@@ -167,7 +171,17 @@ class CardService:
         self._deck_service.get_by_public_id(deck_id)
         now = self._utc_now()
         tags_csv = self._serialize_tags(payload.tags)
-        content_json = self._serialize_content(payload.content)
+
+        phrase = payload.content["phrase"]
+        unique_name, output_path = self._text_speech_service.generate_tts_audio(phrase)
+
+        b64 = mp3_to_base64(output_path)
+
+        content_json = self._serialize_content({
+                "phrase": phrase,
+                "audio": b64
+        })
+
         card_public_id = str(uuid4())
         row = self._repo.insert(
             public_id=card_public_id,

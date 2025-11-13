@@ -60,6 +60,44 @@ import torch
 from transformers import AutoProcessor, AutoModelForCTC
 
 
+# --- Phonemizer setup (opcional/específico do macOS + Homebrew) ---
+try:
+    from phonemizer.backend.espeak.wrapper import EspeakWrapper
+    EspeakWrapper.set_library("/opt/homebrew/opt/espeak-ng/lib/libespeak-ng.dylib")
+except Exception:
+    pass
+
+from phonemizer import phonemize
+from phonemizer.separator import Separator
+
+phoneme_sep = Separator(phone=" ", word=" | ")
+
+_CACHE_MAXSIZE = 100_000  # cache p/ palavras
+
+@lru_cache(maxsize=_CACHE_MAXSIZE)
+def _phonemize_word(word: str) -> str:
+    return phonemize(
+        [word],
+        language="en-us",
+        backend="espeak",
+        with_stress=True,
+        strip=True,
+        separator=phoneme_sep,
+    )[0]
+
+def _tokenize_words(text: str) -> List[str]:
+    # somente letras e apóstrofo; minúsculas depois
+    return re.findall(r"[A-Za-z']+", text or "")
+
+def _phonemize_words_with_cache(words: List[str]) -> List[str]:
+    normalized = [w.lower() for w in words]
+    return [_phonemize_word(w) for w in normalized]
+
+def _strip_espeak_marks(tok: str) -> str:
+    t = tok
+    return t
+
+
 # ========================= Util: texto =========================
 
 def normalize_text(s: str) -> str:
@@ -68,9 +106,7 @@ def normalize_text(s: str) -> str:
     return s
 
 def tokenize_words(s: str) -> List[str]:
-    s = re.sub(r"[^\w\s']", " ", (s or ""))
-    s = re.sub(r"\s+", " ", s).strip().lower()
-    return [t for t in s.split() if t]
+    return _tokenize_words(s)
 
 
 # ========================= Áudio (resample otimizado) =========================
@@ -91,155 +127,7 @@ def load_audio_16k_mono(path: str) -> np.ndarray:
     return audio.astype(np.float32)
 
 
-# ========================= G2P e mapeamento =========================
-
-_g2p = G2p()
-_ARPA_RE = re.compile(r"[A-Z]+[0-2]?")  # tokens ARPAbet (com stress opcional)
-
-@lru_cache(maxsize=100_000)
-def _g2p_arpabet_tokens_cached(word_casefold: str) -> List[str]:
-    toks = [t for t in _g2p(word_casefold) if t.strip()]
-    return [t for t in toks if _ARPA_RE.fullmatch(t)]
-
-def g2p_arpabet_tokens(word: str) -> List[str]:
-    # cache por palavra em lower/casefold para maximizar acertos
-    return _g2p_arpabet_tokens_cached(word.casefold())
-
-def strip_stress(ph: str) -> str:
-    return re.sub(r"[0-2]$", "", ph)
-
-# Candidatos IPA/TIMIT por ARPAbet (ordem de preferência)
-_ARPA_TO_IPA_CANDIDATES: Dict[str, List[str]] = {
-    # Vogais
-    "AA": ["ɑ", "aa"], "AE": ["æ", "ae"], "AH": ["ʌ", "ah"], "AO": ["ɔ", "ao"],
-    "EH": ["ɛ", "eh"], "IH": ["ɪ", "ih"], "IY": ["i", "iy"], "UH": ["ʊ", "uh"], "UW": ["u", "uw"],
-    "ER": ["ɝ", "ɚ", "er"], "EY": ["eɪ", "ey"], "AY": ["aɪ", "ay"], "OW": ["oʊ", "ow"],
-    "OY": ["ɔɪ", "oy"], "AW": ["aʊ", "aw"],
-    # Consoantes
-    "P": ["p"], "B": ["b"], "T": ["t"], "D": ["d"], "K": ["k"], "G": ["ɡ", "g"],
-    "CH": ["tʃ", "ch"], "JH": ["ʤ", "dʒ", "jh"], "SH": ["ʃ", "sh"], "ZH": ["ʒ", "zh"],
-    "S": ["s"], "Z": ["z"], "F": ["f"], "V": ["v"],
-    "TH": ["θ", "th"], "DH": ["ð", "dh"],
-    "M": ["m"], "N": ["n"], "NG": ["ŋ", "ng"],
-    "L": ["l"], "R": ["ɹ", "r"], "Y": ["j", "y"], "W": ["w"], "HH": ["h", "hh"],
-    # Pausas
-    "SIL": ["sil"], "SPN": ["spn"], "NSN": ["nsn"],
-}
-
-def build_arpabet_to_model_vocab_map(model_vocab: Dict[str, int]) -> Dict[str, str]:
-    """Cria um mapeamento ARPAbet→símbolos do vocabulário do modelo (IPA/TIMIT).
-
-        A função percorre uma lista de candidatos por símbolo ARPAbet (ex.: `AE→["æ","ae"]`,
-        `CH→["tʃ","ch"]`, `ER→["ɝ","ɚ","er"]`) e escolhe **o primeiro candidato que existir**
-        no vocabulário do modelo (`model_vocab`). O retorno é um dicionário cujo *key* é o
-        símbolo ARPAbet **sem marca de acento** (stress) e o *value* é o token equivalente
-        presente no vocabulário do modelo.
-
-        Observações importantes:
-          * O stripping do stress (remover dígitos 0–2 no fim, p.ex. `AE1→AE`) **não é feito aqui**;
-            este mapeamento assume as chaves ARPAbet base (ex.: `AE`, `IY`, `CH`). O stripping ocorre
-            na fase que chama este mapeamento.
-          * Pausas/ruído `SIL`, `SPN`, `NSN` também possuem candidatos (`"sil"`, `"spn"`, `"nsn"`).
-            Se estiverem no vocabulário, serão mapeados; em etapas posteriores, esses tokens
-            normalmente são filtrados como não-fonêmicos.
-          * Quando existem múltiplos candidatos (p.ex. `ER→["ɝ","ɚ","er"]`), a **ordem dos candidatos**
-            define a preferência. Assim, se o vocabulário tiver `ɝ`, mapeia para `ɝ`; caso não, tenta
-            `ɚ`; caso não, `"er"`.
-          * O mapeamento é **determinístico** dado o `model_vocab` e a lista de candidatos embutida.
-
-        Args:
-          model_vocab (Dict[str, int]):
-              Vocabulário do modelo (tipicamente `processor.tokenizer.get_vocab()`), mapeando
-              `token -> id`. As chaves devem ser strings exatamente iguais às usadas pelo
-              tokenizador do modelo (ex.: `{"æ": 123, "tʃ": 87, "ɹ": 45, "sil": 0, ...}`).
-
-        Returns:
-          Dict[str, str]:
-              Dicionário `arpa -> token_modelo`. Inclui apenas as entradas ARPAbet cujos
-              candidatos aparecem no `model_vocab`. Entradas sem nenhum candidato presente
-              são omitidas.
-
-        Examples:
-          >>> vocab = {"æ": 10, "i": 11, "tʃ": 12, "sil": 0, "ɹ": 13}
-          >>> build_arpabet_to_model_vocab_map(vocab)
-          {'AE': 'æ', 'IY': 'i', 'CH': 'tʃ', 'SIL': 'sil', 'R': 'ɹ'}
-
-        Quando usar:
-          * Antes de converter uma sequência ARPAbet (vinda do G2P) para os símbolos aceitos
-            pelo modelo de CTC (IPA/TIMIT).
-          * Em pipelines que precisam de compatibilidade entre G2P (ARPAbet) e o inventário
-            fonético do modelo.
-
-        Quando não usar:
-          * Se seu G2P já produz diretamente os símbolos do vocabulário do modelo.
-          * Se o modelo usa um inventário incompatível (por ex., outra convenção que não IPA/TIMIT).
-
-        Boas práticas:
-          * Verifique se os tokens do seu modelo estão em **lowercase/uppercase** compatível
-            com os candidatos. Os candidatos desta função já estão alinhados aos modelos
-            baseados em TIMIT/IPA comuns em ASR/CTC.
-          * Caso use um modelo com inventário diferente, adapte a lista de candidatos
-            (constante interna) para refletir suas preferências.
-    """
-    present = set(model_vocab.keys())
-    out: Dict[str, str] = {}
-    for arpa, cands in _ARPA_TO_IPA_CANDIDATES.items():
-        for cand in cands:
-            if cand in present:
-                out[arpa] = cand
-                break
-    return out
-
 from typing import List, Dict, Tuple
-
-def map_ref_arpabet_to_model_symbols(ref_arpa_seq: List[str],
-                                     arpa2sym: Dict[str, str]) -> Tuple[List[str], List[str]]:
-    """Converte uma sequência ARPAbet (com stress opcional) para símbolos do modelo.
-
-    Regras:
-      - Remove stress (0–2) no fim do token ARPAbet.
-      - Ignora pausas/ruído (SIL, SPN, NSN) completamente (não entra em mapped, nem em missing).
-      - Se houver mapeamento em `arpa2sym` e o símbolo mapeado for não-fonêmico
-        ("sil", "spn", "nsn"), também ignora.
-      - Mantém a ordem original em `mapped`.
-      - Retorna `missing` como lista única e ordenada (ordem alfabética).
-
-    Args:
-      ref_arpa_seq: lista de tokens ARPAbet possivelmente com stress (ex.: ["AE1","T","ER0","SIL"]).
-      arpa2sym: mapeamento ARPAbet base (sem stress) -> símbolo do vocabulário do modelo.
-
-    Returns:
-      (mapped, missing)
-        mapped: lista de símbolos do modelo (IPA/TIMIT) já sem pausas.
-        missing: bases ARPAbet sem mapeamento, únicas e ordenadas (ex.: ["ER","F"]).
-    """
-    NON_PHONEMIC_BASES = {"SIL", "SPN", "NSN"}
-    NON_PHONEMIC_SYMS  = {"sil", "spn", "nsn"}
-
-    mapped: List[str] = []
-    missing: List[str] = []
-
-    for ph in ref_arpa_seq:
-        base = strip_stress(ph)
-
-        # Ignora completamente pausas/ruído na referência.
-        if base in NON_PHONEMIC_BASES:
-            continue
-
-        sym = arpa2sym.get(base)
-        if sym is None:
-            missing.append(base)
-            continue
-
-        # Mesmo se houver mapeamento, se cair em símbolo não-fonêmico, descarta.
-        if sym in NON_PHONEMIC_SYMS:
-            continue
-
-        mapped.append(sym)
-
-    return mapped, sorted(set(missing))
-
-
 
 # ========================= Correções e normalização =========================
 
@@ -281,101 +169,101 @@ def gop_lr_excluding_self(seg_log_post: np.ndarray, li: int, rival_mask: np.ndar
     return float(np.mean(log_p_l - rival))
 
 
-def expand_diphthongs_if_missing(phones: List[str], model_vocab: Dict[str, int]) -> List[str]:
-    """Expande ditongos *apenas quando o modelo não possui o token composto*.
+# def expand_diphthongs_if_missing(phones: List[str], model_vocab: Dict[str, int]) -> List[str]:
+#     """Expande ditongos *apenas quando o modelo não possui o token composto*.
+#
+#         Muitos vocabulários de ASR/CTC trazem vogais como unidades simples (``"e"``,
+#         ``"ɪ"`` etc.) e **não** incluem o ditongo como um único token (p.ex. ``"eɪ"``).
+#         Esta função detecta ditongos conhecidos e os **divide em duas vogais** somente
+#         se:
+#           1) o ditongo **não** estiver em ``model_vocab``; **e**
+#           2) **ambas** as partes estiverem em ``model_vocab``.
+#
+#         Caso contrário, o símbolo é mantido como veio.
+#
+#         Ditongos suportados (lado esquerdo → partes):
+#           * ``"eɪ" → ["e", "ɪ"]``
+#           * ``"oʊ" → ["o", "ʊ"]``
+#           * ``"aɪ" → ["a", "ɪ"]``
+#           * ``"aʊ" → ["a", "ʊ"]``
+#           * ``"ɔɪ" → ["ɔ", "ɪ"]``
+#
+#         Observações importantes:
+#           * **Não** re-divide símbolos que já existem no vocabulário do modelo. Ex. se
+#             ``"eɪ"`` existir em ``model_vocab``, ele é preservado.
+#           * **Não** cria símbolos novos: se alguma parte do ditongo não existir no
+#             vocabulário (ex.: modelo sem ``"ɔ"``), o ditongo composto é mantido.
+#           * A ordem e o comprimento da sequência podem mudar (quando há expansão),
+#             mas os demais símbolos são preservados.
+#           * A função **não** normaliza equivalências (p.ex. ``ʤ → dʒ``), **não**
+#             filtra pausas/ruído (``sil``, ``spn``, ``nsn``) e **não** verifica
+#             fonotática; ela só trata a expansão de ditongos listados acima.
+#
+#         Args:
+#           phones (List[str]):
+#               Sequência de símbolos alvo já mapeados para o “alfabeto” do modelo
+#               (tipicamente após ``map_ref_arpabet_to_model_symbols``). Pode conter
+#               ditongos e monoftongos.
+#           model_vocab (Dict[str, int]):
+#               Vocabulário do modelo (``token → id``). Usado para checar se o
+#               ditongo e/ou suas partes existem no modelo.
+#
+#         Returns:
+#           List[str]: Nova sequência de símbolos, onde ditongos foram divididos em duas
+#           vogais **somente** quando o token composto faltava no vocabulário mas as
+#           duas partes existiam.
+#
+#         Exemplos:
+#           >>> vocab = {"k":0, "e":1, "ɪ":2, "t":3}            # sem "eɪ"
+#           >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
+#           ['k', 'e', 'ɪ', 't']
+#
+#           >>> vocab = {"k":0, "eɪ":1, "t":2}                  # com "eɪ"
+#           >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
+#           ['k', 'eɪ', 't']
+#
+#           >>> vocab = {"k":0, "ɪ":1, "t":2}                   # sem "e" ⇒ não divide
+#           >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
+#           ['k', 'eɪ', 't']
+#
+#         Quando usar:
+#           * Após mapear ARPAbet → símbolos do modelo, para aumentar a cobertura em
+#             modelos que não possuem tokens de ditongo.
+#
+#         Quando não usar:
+#           * Se o seu modelo já contém todos os ditongos relevantes como tokens únicos.
+#           * Se você precisa de outras normalizações/expansões (essas etapas são
+#             tratadas por outras funções, p.ex. ``normalize_phone_sequence``).
+#
+#         Desempenho:
+#           * Complexidade O(N), com N = número de símbolos em ``phones``.
+#           * Não aloca estruturas grandes; seguro para uso em lote.
+#    """
+#     out: List[str] = []
+#     for ph in phones:
+#         if ph in model_vocab:
+#             out.append(ph)
+#         elif ph in _DIPH_SPLITS:
+#             parts = _DIPH_SPLITS[ph]
+#             if all((p in model_vocab) for p in parts):
+#                 out.extend(parts)
+#             else:
+#                 out.append(ph)
+#         else:
+#             out.append(ph)
+#     return out
 
-        Muitos vocabulários de ASR/CTC trazem vogais como unidades simples (``"e"``,
-        ``"ɪ"`` etc.) e **não** incluem o ditongo como um único token (p.ex. ``"eɪ"``).
-        Esta função detecta ditongos conhecidos e os **divide em duas vogais** somente
-        se:
-          1) o ditongo **não** estiver em ``model_vocab``; **e**
-          2) **ambas** as partes estiverem em ``model_vocab``.
-
-        Caso contrário, o símbolo é mantido como veio.
-
-        Ditongos suportados (lado esquerdo → partes):
-          * ``"eɪ" → ["e", "ɪ"]``
-          * ``"oʊ" → ["o", "ʊ"]``
-          * ``"aɪ" → ["a", "ɪ"]``
-          * ``"aʊ" → ["a", "ʊ"]``
-          * ``"ɔɪ" → ["ɔ", "ɪ"]``
-
-        Observações importantes:
-          * **Não** re-divide símbolos que já existem no vocabulário do modelo. Ex. se
-            ``"eɪ"`` existir em ``model_vocab``, ele é preservado.
-          * **Não** cria símbolos novos: se alguma parte do ditongo não existir no
-            vocabulário (ex.: modelo sem ``"ɔ"``), o ditongo composto é mantido.
-          * A ordem e o comprimento da sequência podem mudar (quando há expansão),
-            mas os demais símbolos são preservados.
-          * A função **não** normaliza equivalências (p.ex. ``ʤ → dʒ``), **não**
-            filtra pausas/ruído (``sil``, ``spn``, ``nsn``) e **não** verifica
-            fonotática; ela só trata a expansão de ditongos listados acima.
-
-        Args:
-          phones (List[str]):
-              Sequência de símbolos alvo já mapeados para o “alfabeto” do modelo
-              (tipicamente após ``map_ref_arpabet_to_model_symbols``). Pode conter
-              ditongos e monoftongos.
-          model_vocab (Dict[str, int]):
-              Vocabulário do modelo (``token → id``). Usado para checar se o
-              ditongo e/ou suas partes existem no modelo.
-
-        Returns:
-          List[str]: Nova sequência de símbolos, onde ditongos foram divididos em duas
-          vogais **somente** quando o token composto faltava no vocabulário mas as
-          duas partes existiam.
-
-        Exemplos:
-          >>> vocab = {"k":0, "e":1, "ɪ":2, "t":3}            # sem "eɪ"
-          >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
-          ['k', 'e', 'ɪ', 't']
-
-          >>> vocab = {"k":0, "eɪ":1, "t":2}                  # com "eɪ"
-          >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
-          ['k', 'eɪ', 't']
-
-          >>> vocab = {"k":0, "ɪ":1, "t":2}                   # sem "e" ⇒ não divide
-          >>> expand_diphthongs_if_missing(["k","eɪ","t"], vocab)
-          ['k', 'eɪ', 't']
-
-        Quando usar:
-          * Após mapear ARPAbet → símbolos do modelo, para aumentar a cobertura em
-            modelos que não possuem tokens de ditongo.
-
-        Quando não usar:
-          * Se o seu modelo já contém todos os ditongos relevantes como tokens únicos.
-          * Se você precisa de outras normalizações/expansões (essas etapas são
-            tratadas por outras funções, p.ex. ``normalize_phone_sequence``).
-
-        Desempenho:
-          * Complexidade O(N), com N = número de símbolos em ``phones``.
-          * Não aloca estruturas grandes; seguro para uso em lote.
-   """
-    out: List[str] = []
-    for ph in phones:
-        if ph in model_vocab:
-            out.append(ph)
-        elif ph in _DIPH_SPLITS:
-            parts = _DIPH_SPLITS[ph]
-            if all((p in model_vocab) for p in parts):
-                out.extend(parts)
-            else:
-                out.append(ph)
-        else:
-            out.append(ph)
-    return out
-
-_EQUIV_PHONES = {
-    "ʧ": "tʃ",
-    "ʤ": "dʒ",
-    "ɡ": "g",
-    "r": "ɹ",
-    "ɚ": "ɝ",
-    # "ɜ": "ə",
-}
+# _EQUIV_PHONES = {
+#     "ʧ": "tʃ",
+#     "ʤ": "dʒ",
+#     "ɡ": "g",
+#     "r": "ɹ",
+#     "ɚ": "ɝ",
+#     # "ɜ": "ə",
+# }
 
 def normalize_phone_symbol(p: str) -> str:
-    return _EQUIV_PHONES.get(p, p)
+    return p #_EQUIV_PHONES.get(p, p)
 
 def normalize_phone_sequence(seq: List[str]) -> List[str]:
     return [normalize_phone_symbol(p) for p in seq]
@@ -1784,18 +1672,9 @@ def _macro_fluency_score(words_per_sec_pruned: float,
         }
 
 
-
     s_rate  = _norm01_from_range(words_per_sec_pruned, ranges["rate_lo"], ranges["rate_hi"])
     s_pause = 1.0 - _norm01_from_range(pause_ratio_full, ranges["pause_lo"], ranges["pause_hi"])
     s_artic = _norm01_from_range(articulation_rate_syll_per_sec, ranges["art_lo"], ranges["art_hi"])
-
-    print("words_per_sec_pruned", words_per_sec_pruned)
-    print("pause_ratio_full", pause_ratio_full)
-    print("pause_ratio_full", articulation_rate_syll_per_sec)
-    print("++++++++++")
-    print("words_per_sec_pruned", s_rate)
-    print("pause_ratio_full", s_pause)
-    print("pause_ratio_full", s_artic)
 
     # pesos: idealmente aprendidos; aqui pesos balanceados como exemplo
     w_rate, w_pause, w_artic = 0.50, 0.40, 0.2
@@ -2222,7 +2101,7 @@ class PronEvaluator:
           0.82  # ~exemplo
     """
     def __init__(self,
-                 model_id: str = "vitouphy/wav2vec2-xls-r-300m-timit-phoneme",
+                 model_id: str = "bobboyms/wav2vec2-xls-r-300m-en-phoneme-ctc-41h", #"vitouphy/wav2vec2-xls-r-300m-timit-phoneme",
                  device: Optional[str] = None,
                  min_frames_per_phone: int = 2,
                  gop_thresholds: Optional[Dict[str, float]] = None,
@@ -2246,6 +2125,7 @@ class PronEvaluator:
 
         # Carrega processor/modelo uma única vez
         self.processor = AutoProcessor.from_pretrained(model_id)
+        print("model_id:", model_id)
         base_model = AutoModelForCTC.from_pretrained(model_id)
 
         # torch.compile (quando disponível) pode dar ganho em CPU/CUDA
@@ -2262,7 +2142,7 @@ class PronEvaluator:
 
         self.blank_id = getattr(self.processor.tokenizer, "pad_token_id", 0)
 
-        self.arpa2sym = build_arpabet_to_model_vocab_map(self.vocab)
+        # self.arpa2sym = build_arpabet_to_model_vocab_map(self.vocab)
         self.ignore_tokens = {"|", "<s>", "</s>", " ", "sil", "spn", "nsn"}
 
         self.min_frames_per_phone = max(1, int(min_frames_per_phone))
@@ -2457,22 +2337,27 @@ class PronEvaluator:
         hyp_tokens = self._ids_to_tokens(hyp_ids_collapsed)
         hyp_phones_all = [t for t in hyp_tokens if t and (t not in self.ignore_tokens)]
         hyp_phones_all = filter_non_phonemic(hyp_phones_all)
-        hyp_phones_all = normalize_phone_sequence(hyp_phones_all)
+        # hyp_phones_all = normalize_phone_sequence(hyp_phones_all)
 
         # ---------- REF (fonemas alvo) ----------
-        words = tokenize_words(target_text)
-        ref_arpa_by_word: List[List[str]] = [g2p_arpabet_tokens(w) for w in words]
+        words = _tokenize_words(target_text)
+        # phonemizer retorna 1 string por palavra, com fones separados por espaço
+        ph_strings_by_word: List[str] = _phonemize_words_with_cache(words)
+
         ref_phones_by_word: List[List[str]] = []
-        for arpa_seq in ref_arpa_by_word:
-            mapped, _missing = map_ref_arpabet_to_model_symbols(arpa_seq, self.arpa2sym)
-            mapped = expand_diphthongs_if_missing(mapped, self.tok2id)
-            mapped = filter_non_phonemic(mapped)
-            mapped = normalize_phone_sequence(mapped)
-            ref_phones_by_word.append(mapped)
+        for ph_str in ph_strings_by_word:
+            # split em fones + remoção de marcas de acento/comprimento
+            toks = (ph_str.split() if ph_str else [])
+            # filtra tokens não-fonêmicos, normaliza equivalências (ʤ→dʒ etc.)
+            toks = filter_non_phonemic(toks)
+            toks = normalize_phone_sequence(toks)
+            # expande ditongos somente se necessário (quando modelo não tem eɪ/oʊ/etc.)
+            # toks = expand_diphthongs_if_missing(toks, self.tok2id)
+            ref_phones_by_word.append(toks)
 
         # concat REF + spans
         ref_phones_all: List[str] = []
-        ref_word_spans: List[Tuple[int,int]] = []
+        ref_word_spans: List[Tuple[int, int]] = []
         cursor = 0
         for phs in ref_phones_by_word:
             start = cursor
@@ -2794,106 +2679,7 @@ class PronEvaluator:
         }
 
 
-# ========================= Singleton do serviço =========================
 
-gop_thresholds = {
-    # ================= VOGAIS MONOFTONGOS =================
-    "i":  0.12,  # alta, anterior (estável)
-    "ɪ":  0.10,
-    "e":  0.10,  # se existir como monoftongo no vocabulário
-    "ɛ":  0.10,
-    "æ":  0.08,  # mais difícil p/ L2
-    "ɑ":  0.12,
-    "ʌ":  0.10,
-    "ə":  0.08,  # schwa é instável (mais permissivo)
-    "ɝ":  0.07,  # rótica é difícil — mais permissivo
-    "ɔ":  0.09,
-    "ʊ":  0.08,  # curta e confusável
-    "u":  0.12,
-
-    # ================= DITONGOS =================
-    "eɪ": 0.09,
-    "oʊ": 0.09,
-    "aɪ": 0.08,
-    "aʊ": 0.08,
-    "ɔɪ": 0.08,
-
-    # ================= STOPS =================
-    "p": 0.10, "b": 0.10,
-    "t": 0.10, "d": 0.10,
-    "k": 0.10, "g": 0.10, "ɡ": 0.10,  # g/ɡ mapeiam para o mesmo
-
-    # ================= AFRICADAS =================
-    "tʃ": 0.08,
-    "dʒ": 0.08, "ʤ": 0.08,  # normalização cobre ambas
-
-    # ================= FRICATIVAS =================
-    "f": 0.09, "v": 0.09,
-    "θ": 0.07, "ð": 0.07,  # difíceis p/ L2 → mais permissivo
-    "s": 0.10, "z": 0.10,
-    "ʃ": 0.09, "ʒ": 0.08,
-    "h": 0.08,
-
-    # ================= NASAIS =================
-    "m": 0.10, "n": 0.10, "ŋ": 0.10,
-
-    # ================= LÍQUIDAS / APROXIMANTES =================
-    "l": 0.09,
-    "ɹ": 0.07,  # /r/ americano é difícil
-    "w": 0.09,
-    "j": 0.09,
-
-    # (tokens não-fonêmicos como "sil"/"spn"/"nsn" não recebem threshold)
-}
-gop_thresholds = {
-    # ================= VOGAIS MONOFTONGOS =================
-    "i":  0.12,  # alta, anterior (estável)
-    "ɪ":  0.10,
-    "e":  0.10,  # se existir como monoftongo no vocabulário
-    "ɛ":  0.10,
-    "æ":  0.08,  # mais difícil p/ L2
-    "ɑ":  0.12,
-    "ʌ":  0.10,
-    "ə":  0.08,  # schwa é instável (mais permissivo)
-    "ɝ":  0.07,  # rótica é difícil — mais permissivo
-    "ɔ":  0.09,
-    "ʊ":  0.08,  # curta e confusável
-    "u":  0.12,
-
-    # ================= DITONGOS =================
-    "eɪ": 0.09,
-    "oʊ": 0.09,
-    "aɪ": 0.08,
-    "aʊ": 0.08,
-    "ɔɪ": 0.08,
-
-    # ================= STOPS =================
-    "p": 0.10, "b": 0.10,
-    "t": 0.10, "d": 0.10,
-    "k": 0.10, "g": 0.10, "ɡ": 0.10,  # g/ɡ mapeiam para o mesmo
-
-    # ================= AFRICADAS =================
-    "tʃ": 0.08,
-    "dʒ": 0.08, "ʤ": 0.08,  # normalização cobre ambas
-
-    # ================= FRICATIVAS =================
-    "f": 0.09, "v": 0.09,
-    "θ": 0.07, "ð": 0.07,  # difíceis p/ L2 → mais permissivo
-    "s": 0.10, "z": 0.10,
-    "ʃ": 0.09, "ʒ": 0.08,
-    "h": 0.08,
-
-    # ================= NASAIS =================
-    "m": 0.10, "n": 0.10, "ŋ": 0.10,
-
-    # ================= LÍQUIDAS / APROXIMANTES =================
-    "l": 0.09,
-    "ɹ": 0.07,  # /r/ americano é difícil
-    "w": 0.09,
-    "j": 0.09,
-
-    # (tokens não-fonêmicos como "sil"/"spn"/"nsn" não recebem threshold)
-}
 
 _SERVICE_SINGLETON: Optional[PronEvaluator] = None
 
@@ -3240,7 +3026,7 @@ def formater_output(data):
 if __name__ == "__main__":
     service = get_pron_service()
     # "meu_audio.wav" "audio.mp3"
-    result = service.evaluate("meu_audio.wav", "She look guilty after lying to her friend")
+    result = service.evaluate("audio.mp3", "She look guilty after lying to her friend")
 
     data = formater_output(result["sentence_metrics"])
     print(data)

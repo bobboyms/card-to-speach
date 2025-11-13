@@ -38,6 +38,7 @@ from typing import Any, Callable, Dict, List
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 
 from app import config, time_utils
 from app.db import db_manager
@@ -56,6 +57,7 @@ from app.schemas import (
     ReviewOut, EvalResponse, EvalRequest,
 )
 from app.services.other_services import DeckService, CardService, ReviewService
+from app.services.text_to_speech import TextToSpeach
 from app.utils.b64 import b64_to_temp_audio_file
 
 # ---------------------------------
@@ -80,6 +82,8 @@ utc_now = time_utils.utc_now
 utc_today = time_utils.utc_today
 _normalize_due_day = time_utils.normalize_due_day
 
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,14 +106,19 @@ def get_deck_service(
 ) -> DeckService:
     return DeckService(repo)
 
+def get_text_to_speech_service(
+) -> TextToSpeach:
+    return TextToSpeach()
 
 def get_card_service(
     repo: CardRepository = Depends(get_card_repository),
     deck_service: DeckService = Depends(get_deck_service),
+    text_to_speech_service: TextToSpeach = Depends(get_text_to_speech_service)
 ) -> CardService:
     return CardService(
         repo,
         deck_service,
+        text_to_speech_service,
         utc_now,
     )
 
