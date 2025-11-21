@@ -55,7 +55,7 @@ class DeckService:
             raise HTTPException(status_code=404, detail=f"Deck '{name}' not found")
         return row
 
-    def create(self, payload: DeckCreate) -> DeckOut:
+    def create(self, payload: DeckCreate, user_id: str) -> DeckOut:
         """Create a new deck and return its representation."""
         name = payload.name.strip()
         if not name:
@@ -63,13 +63,13 @@ class DeckService:
         if self._repo.exists(name):
             raise HTTPException(status_code=409, detail="Deck already exists")
         public_id = str(uuid4())
-        deck_row = self._repo.insert(name=name, deck_type=payload.type, public_id=public_id)
+        deck_row = self._repo.insert(name=name, deck_type=payload.type, public_id=public_id, user_id=user_id)
         return self._row_to_deck_out(deck_row)
 
-    def list(self) -> List[DeckOut]:
+    def list(self, user_id: str) -> List[DeckOut]:
         """Return all decks ordered alphabetically along with card statistics."""
         now_iso = utc_now().isoformat(timespec="seconds")
-        rows = self._repo.list_with_counts(now_iso)
+        rows = self._repo.list_with_counts(now_iso, user_id)
         return [self._row_to_deck_out(row) for row in rows]
 
     def rename(self, public_id: str, payload: DeckRename) -> DeckOut:
@@ -168,7 +168,7 @@ class CardService:
             raise HTTPException(status_code=status_code, detail=detail)
         return deck_id
 
-    def create(self, payload: CardCreate) -> CardOut:
+    def create(self, payload: CardCreate, user_id: str) -> CardOut:
         """Insert a new card in learning mode and return its API model."""
         deck_id = self._require_deck_id(
             payload.deck_id,
@@ -204,10 +204,11 @@ class CardService:
             is_learning=1,
             learn_step_idx=0,
             due_ts=now.isoformat(timespec="seconds"),
+            user_id=user_id,
         )
         return self._row_to_cardout(row)
 
-    def list_by_deck(self, deck: str, limit: int) -> List[CardOut]:
+    def list_by_deck(self, deck: str, limit: int, user_id: str) -> List[CardOut]:
         """Return cards for a deck ordered by due timestamp."""
         deck_id = self._require_deck_id(
             deck,
@@ -215,10 +216,10 @@ class CardService:
             detail="Deck not found",
         )
         self._deck_service.get_by_public_id(deck_id)
-        rows = self._repo.list_by_deck(deck_id, limit)
+        rows = self._repo.list_by_deck(deck_id, limit, user_id)
         return [self._row_to_cardout(row) for row in rows]
 
-    def list_due(self, deck: str, limit: int, offset: int) -> CardsPage:
+    def list_due(self, deck: str, limit: int, offset: int, user_id: str) -> CardsPage:
         """Return paginated due cards for a deck."""
         deck_id = self._require_deck_id(
             deck,
@@ -227,7 +228,7 @@ class CardService:
         )
         self._deck_service.get_by_public_id(deck_id)
         now_iso = self._utc_now().isoformat(timespec="seconds")
-        total, rows = self._repo.list_due(deck_id, now_iso, limit, offset)
+        total, rows = self._repo.list_due(deck_id, now_iso, limit, offset, user_id)
         items = [self._row_to_cardout(row) for row in rows]
         next_off = offset + limit if offset + limit < total else None
         return CardsPage(items=items, total=int(total), limit=limit, offset=offset, next_offset=next_off)
@@ -373,14 +374,14 @@ class ReviewService:
         self._learn_ahead_if_empty = learn_ahead_if_empty
         self._min_ef = min_ef
 
-    def peek_next_due(self, deck_public_id: str) -> CardOut:
+    def peek_next_due(self, deck_public_id: str, user_id: str) -> CardOut:
         """Return the next card that should be studied for the given deck."""
-        row = self._select_next_row(deck_public_id)
+        row = self._select_next_row(deck_public_id, user_id)
         return self._card_service.to_card_out(row)
 
-    def review_next_due_by_grade(self, deck_public_id: str, grade: int) -> ReviewOut:
+    def review_next_due_by_grade(self, deck_public_id: str, grade: int, user_id: str) -> ReviewOut:
         """Apply an SM-2 grade to the next due card."""
-        row = self._select_next_row(deck_public_id)
+        row = self._select_next_row(deck_public_id, user_id)
         return self._apply_review(row, grade)
 
     def review_card_button(self, card_public_id: str, button: str) -> ReviewOut:
@@ -388,7 +389,7 @@ class ReviewService:
         row = self._card_service.fetch_row(card_public_id)
         return self._review_with_button(row, button)
 
-    def _select_next_row(self, deck_public_id: str) -> Dict[str, Any]:
+    def _select_next_row(self, deck_public_id: str, user_id: str) -> Dict[str, Any]:
         """Select the next card row according to due rules and learn-ahead policy."""
         deck_id = deck_public_id.strip()
         if not deck_id:
@@ -398,7 +399,7 @@ class ReviewService:
         now_iso = now.isoformat(timespec="seconds")
         ahead_iso = (now + timedelta(minutes=self._learn_ahead_minutes())).isoformat(timespec="seconds")
         row = self._card_repo.select_next_for_review(
-            deck_id, now_iso, ahead_iso, self._learn_ahead_if_empty()
+            deck_id, now_iso, ahead_iso, self._learn_ahead_if_empty(), user_id
         )
         if not row:
             raise HTTPException(status_code=404, detail="No card due right now")

@@ -219,6 +219,34 @@ async def verify_auth_global(
         )
 
 
+async def get_current_user_id(
+    token: str = Depends(oauth2_scheme),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> str:
+    """Extract and return the user_id from the JWT token."""
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    try:
+        if auth_service.is_token_revoked(token):
+            raise ValueError("Token has been revoked")
+        payload = auth_service.verify_jwt(token)
+        user_id = payload.get("user_id")
+        if not user_id:
+            raise ValueError("Token does not contain user_id")
+        return user_id
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 # ---------------
 # FastAPI (app)
 # ---------------
@@ -252,17 +280,19 @@ app.add_middleware(
 def create_deck(
     payload: DeckCreate,
     deck_service: DeckService = Depends(get_deck_service),
+    user_id: str = Depends(get_current_user_id),
 ):
     """Create a new deck with an explicit type ('speech' or 'shadowing')."""
-    return deck_service.create(payload)
+    return deck_service.create(payload, user_id)
 
 
 @app.get("/decks", response_model=List[DeckOut])
 def list_decks(
     deck_service: DeckService = Depends(get_deck_service),
+    user_id: str = Depends(get_current_user_id),
 ):
     """List all decks."""
-    return deck_service.list()
+    return deck_service.list(user_id)
 
 
 @app.patch("/decks/{public_id}", response_model=DeckOut)
@@ -292,9 +322,10 @@ def delete_deck(
 def create_card(
     payload: CardCreate,
     card_service: CardService = Depends(get_card_service),
+    user_id: str = Depends(get_current_user_id),
 ):
     """Create a card in learning mode."""
-    return card_service.create(payload)
+    return card_service.create(payload, user_id)
 
 
 @app.get("/cards", response_model=List[CardOut])
@@ -302,9 +333,10 @@ def list_cards(
     deck_id: str = Query(..., description="Deck public UUID"),
     limit: int = Query(50, ge=1, le=500),
     card_service: CardService = Depends(get_card_service),
+    user_id: str = Depends(get_current_user_id),
 ):
     """List cards for a deck ordered by due timestamp."""
-    return card_service.list_by_deck(deck_id, limit)
+    return card_service.list_by_deck(deck_id, limit, user_id)
 
 
 @app.get("/cards/due", response_model=CardsPage)
@@ -313,9 +345,10 @@ def list_due(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     card_service: CardService = Depends(get_card_service),
+    user_id: str = Depends(get_current_user_id),
 ):
     """Return paginated due cards for a deck."""
-    return card_service.list_due(deck_id, limit, offset)
+    return card_service.list_due(deck_id, limit, offset, user_id)
 
 
 @app.get("/cards/{card_public_id}", response_model=CardOut)
@@ -363,9 +396,10 @@ def delete_card(
 def peek_next_due(
     deck_id: str = Query(..., description="Deck public UUID"),
     review_service: ReviewService = Depends(get_review_service),
+    user_id: str = Depends(get_current_user_id),
 ):
     """Return the next due card for the requested deck using due, learn-ahead, and fallback rules."""
-    return review_service.peek_next_due(deck_id)
+    return review_service.peek_next_due(deck_id, user_id)
 
 
 @app.post("/reviews/next", response_model=ReviewOut)
@@ -373,9 +407,10 @@ def review_next_due_grade(
     deck_id: str = Query(..., description="Deck public UUID"),
     payload: ReviewIn = ...,
     review_service: ReviewService = Depends(get_review_service),
+    user_id: str = Depends(get_current_user_id),
 ):
     """Apply an SM-2 grade to the next due card (same selection criteria as the GET endpoint)."""
-    return review_service.review_next_due_by_grade(deck_id, payload.grade)
+    return review_service.review_next_due_by_grade(deck_id, payload.grade, user_id)
 
 
 @app.post("/cards/{card_public_id}/review", response_model=ReviewOut)

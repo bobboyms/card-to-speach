@@ -41,6 +41,8 @@ class DatabaseManager:
             self._ensure_card_deck_id_column(connection)
             self._ensure_users_table(connection)
             self._ensure_revoked_tokens_table(connection)
+            self._ensure_deck_user_id_column(connection)
+            self._ensure_card_user_id_column(connection)
             self._ensure_indexes(connection)
 
     @staticmethod
@@ -197,6 +199,9 @@ class DatabaseManager:
         conn_obj.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_decks_public_id ON decks(public_id);"
         )
+        conn_obj.execute("CREATE INDEX IF NOT EXISTS idx_decks_user_id ON decks(user_id);")
+        conn_obj.execute("CREATE INDEX IF NOT EXISTS idx_cards_user_id ON cards(user_id);")
+
 
     @staticmethod
     def _migrate_decks_add_ids(conn_obj: sqlite3.Connection) -> None:
@@ -304,6 +309,18 @@ class DatabaseManager:
         )
 
     @staticmethod
+    def _ensure_deck_user_id_column(conn_obj: sqlite3.Connection) -> None:
+        """Ensure decks table tracks the user_id."""
+        if not DatabaseManager._column_exists(conn_obj, "decks", "user_id"):
+            conn_obj.execute("ALTER TABLE decks ADD COLUMN user_id TEXT")
+
+    @staticmethod
+    def _ensure_card_user_id_column(conn_obj: sqlite3.Connection) -> None:
+        """Ensure cards table tracks the user_id."""
+        if not DatabaseManager._column_exists(conn_obj, "cards", "user_id"):
+            conn_obj.execute("ALTER TABLE cards ADD COLUMN user_id TEXT")
+
+    @staticmethod
     def _ensure_revoked_tokens_table(conn_obj: sqlite3.Connection) -> None:
         """Create the revoked_tokens table if it does not exist."""
         conn_obj.execute(
@@ -315,6 +332,7 @@ class DatabaseManager:
             );
             """
         )
+
 
 
 
