@@ -6,6 +6,7 @@ from typing import List, Tuple
 
 import torch
 import torchaudio
+from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
 
 from app.models.word_segment import WordSegment
 
@@ -37,17 +38,16 @@ class ForcedAlignmentService:
     def __init__(self, device: str | None = None, min_word_len_s: float = 0.015):
         self.device = torch.device(device) if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.min_word_len_s = min_word_len_s
-        self._bundle = torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H
-        self._model = None
-        self._labels: Tuple[str, ...] | None = None
+        self.processor = None
+        self.model = None
         self._bundle_sr: int | None = None
 
     def _ensure_model(self):
-        if self._model is None:
-            logger.info("Carregando wav2vec2 bundle para alinhamento...")
-            self._model = self._bundle.get_model().to(self.device).eval()
-            self._labels = self._bundle.get_labels()
-            self._bundle_sr = int(self._bundle.sample_rate)
+        if self.model is None:
+            logger.info("Carregando wav2vec2 model e processor para alinhamento...")
+            self.processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+            self.model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base-960h").to(self.device).eval()
+            self._bundle_sr = 16000
 
     @staticmethod
     def _normalize_transcript(text: str) -> str:
@@ -58,19 +58,26 @@ class ForcedAlignmentService:
 
     def _emission(self, waveform: torch.Tensor) -> torch.Tensor:
         self._ensure_model()
-        assert self._model is not None
+        assert self.model is not None
+        assert self.processor is not None
         with torch.inference_mode():
-            emissions, _ = self._model(waveform.to(self.device))
-            emissions = torch.log_softmax(emissions, dim=-1)
+            # processor expects input values. If tensor, we pass it directly.
+            # We assume waveform is [1, T] or [T].
+            wav_input = waveform.squeeze()
+            if wav_input.ndim > 1:
+                 wav_input = wav_input.mean(dim=0)
+            
+            inputs = self.processor(wav_input, sampling_rate=16000, return_tensors="pt")
+            logits = self.model(inputs.input_values.to(self.device)).logits
+            emissions = torch.log_softmax(logits, dim=-1)
         return emissions[0].cpu()  # [T, C]
 
     def _text_to_tokens(self, transcript_bar: str) -> List[int]:
-        # ensure labels are available for type checkers and at runtime
-        if self._labels is None:
+        if self.processor is None:
             self._ensure_model()
-        assert self._labels is not None
-        dictionary = {c: i for i, c in enumerate(self._labels)}
-        return [dictionary[c] for c in transcript_bar]
+        assert self.processor is not None
+        vocab = self.processor.tokenizer.get_vocab()
+        return [vocab[c] for c in transcript_bar]
 
     @staticmethod
     def _trellis(emission: torch.Tensor, tokens: List[int], blank_id: int = 0) -> torch.Tensor:
@@ -141,8 +148,11 @@ class ForcedAlignmentService:
 
     def align(self, wav_path: str, transcript_text: str) -> List[WordSegment]:
         self._ensure_model()
-        # carrega waveform (torchaudio mantém SR original, a taxa do bundle é usada só para emissão)
+        # carrega waveform e resample se necessário
         waveform, sr = torchaudio.load(wav_path)
+        if sr != 16000:
+            waveform = torchaudio.functional.resample(waveform, sr, 16000)
+            sr = 16000
         if waveform.size(0) > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
 

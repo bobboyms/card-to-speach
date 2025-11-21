@@ -21,6 +21,8 @@ var/
 *.egg
 MANIFEST
 share/python-wheels/
+temp_files/
+gravacoes/
 
 # PyInstaller
 *.spec
