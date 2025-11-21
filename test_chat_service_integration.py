@@ -13,6 +13,7 @@ from app.services.chat_service import ChatService
 # For this test, we will try to instantiate ChatService and check if the method exists and imports are correct.
 # We can't easily test the full flow without a real API key or complex mocking.
 # So we will verify the imports and syntax by instantiating the class (if key exists) or just checking imports.
+# Note: generate_answer_stream now requires user_id parameter for user data ownership.
 
 def test_chat_service_integration():
     print("Testing ChatService integration...")

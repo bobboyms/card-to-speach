@@ -3,7 +3,7 @@ from typing import Optional
 from uuid import uuid4
 
 from app.repositories import UserRepository
-from app.schemas import UserOut
+from app.schemas import UserOut, UserUpdate
 
 
 class UserService:
@@ -44,6 +44,8 @@ class UserService:
             name=user["name"],
             google_id=user["google_id"],
             created_at=user["created_at"],
+            language=user["language"] if "language" in user.keys() else "EN",
+            new_user=bool(user["new_user"]) if "new_user" in user.keys() else True,
         )
 
     def get_user(self, public_id: str) -> Optional[UserOut]:
@@ -55,5 +57,30 @@ class UserService:
                 name=user["name"],
                 google_id=user["google_id"],
                 created_at=user["created_at"],
+                language=user["language"] if "language" in user.keys() else "EN",
+                new_user=bool(user["new_user"]) if "new_user" in user.keys() else True,
             )
         return None
+
+    def update_user(self, public_id: str, update_data: UserUpdate) -> Optional[UserOut]:
+        """Update user information."""
+        updated_user = self.user_repository.update_user(
+            public_id=public_id,
+            name=update_data.name,
+            email=update_data.email,
+            language=update_data.language,
+            new_user=update_data.new_user,
+        )
+        
+        if not updated_user:
+            return None
+        
+        return UserOut(
+            public_id=updated_user["public_id"],
+            email=updated_user["email"],
+            name=updated_user["name"],
+            google_id=updated_user["google_id"],
+            created_at=updated_user["created_at"],
+            language=updated_user["language"] if "language" in updated_user.keys() else "EN",
+            new_user=bool(updated_user["new_user"]) if "new_user" in updated_user.keys() else True,
+        )

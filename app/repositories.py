@@ -302,15 +302,15 @@ class UserRepository:
             ).fetchone()
 
     def create(
-        self, public_id: str, email: str, name: Optional[str], google_id: Optional[str], created_at: str
+        self, public_id: str, email: str, name: Optional[str], google_id: Optional[str], created_at: str, language: str = "EN", new_user: bool = True
     ) -> sqlite3.Row:
         with self._db.connect() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO users (public_id, email, name, google_id, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO users (public_id, email, name, google_id, created_at, language, new_user)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (public_id, email, name, google_id, created_at),
+                (public_id, email, name, google_id, created_at, language, 1 if new_user else 0),
             )
             return connection.execute(
                 "SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)
@@ -324,6 +324,50 @@ class UserRepository:
             )
             return connection.execute(
                 "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+
+    def update_user(
+        self, public_id: str, name: Optional[str] = None, email: Optional[str] = None, language: Optional[str] = None, new_user: Optional[bool] = None
+    ) -> Optional[sqlite3.Row]:
+        """Update user information by public_id."""
+        with self._db.connect() as connection:
+            # First, get the user to ensure they exist
+            user = connection.execute(
+                "SELECT * FROM users WHERE public_id = ?", (public_id,)
+            ).fetchone()
+            
+            if not user:
+                return None
+            
+            # Build dynamic update query based on provided fields
+            update_fields = []
+            params = []
+            
+            if name is not None:
+                update_fields.append("name = ?")
+                params.append(name)
+            
+            if email is not None:
+                update_fields.append("email = ?")
+                params.append(email)
+            
+            if language is not None:
+                update_fields.append("language = ?")
+                params.append(language)
+            
+            if new_user is not None:
+                update_fields.append("new_user = ?")
+                params.append(1 if new_user else 0)
+            
+            # Only update if there are fields to update
+            if update_fields:
+                params.append(public_id)
+                query = f"UPDATE users SET {', '.join(update_fields)} WHERE public_id = ?"
+                connection.execute(query, params)
+            
+            # Return updated user
+            return connection.execute(
+                "SELECT * FROM users WHERE public_id = ?", (public_id,)
             ).fetchone()
 
 

@@ -34,10 +34,11 @@ class ChatService:
                     return match.group(1)
         return None
 
-    def generate_answer_stream(self, history, user_message: str):
+    def generate_answer_stream(self, history, user_message: str, user_id: str):
         """
         history: lista de dicts {"role": "user"|"assistant", "content": str}
         user_message: mensagem atual do usuário
+        user_id: ID do usuário autenticado
 
         Gera pedaços de texto (chunks) da resposta final para streaming.
         """
@@ -184,17 +185,17 @@ class ChatService:
             elif name == "create_new_card":
                 content = args.get("content")
                 deck_id = args.get("deck_id")
-                card_result = call_create_new_card_sync(content, deck_id)
+                card_result = call_create_new_card_sync(content, deck_id, user_id)
                 tool_result_content = json.dumps(card_result)
 
             elif name == "get_all_decks":
-                decks_result = call_get_all_decks_sync()
+                decks_result = call_get_all_decks_sync(user_id)
                 tool_result_content = json.dumps(decks_result)
 
             elif name == "create_new_deck":
                 deck_name = args.get("name")
                 deck_type = args.get("type", "speech")
-                deck_result = call_create_new_deck_sync(deck_name, deck_type)
+                deck_result = call_create_new_deck_sync(deck_name, user_id, deck_type)
                 tool_result_content = json.dumps(deck_result)
 
             else:

@@ -67,8 +67,8 @@ def call_pronunciation_practice_sync(text: str) -> Dict[str, Any]:
     return asyncio.run(mcp_call_pronunciation_practice(text))
 
 
-async def mcp_call_create_new_card(content: Dict[str, Any], deck_id: str):
-    print(f"[MCP CLIENT] Chamando MCP create_new_card(deck_id={deck_id!r})")
+async def mcp_call_create_new_card(content: Dict[str, Any], deck_id: str, user_id: str):
+    print(f"[MCP CLIENT] Chamando MCP create_new_card(deck_id={deck_id!r}, user_id={user_id!r})")
 
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -76,7 +76,7 @@ async def mcp_call_create_new_card(content: Dict[str, Any], deck_id: str):
 
             result = await session.call_tool(
                 "create_new_card",
-                arguments={"content": content, "deck_id": deck_id},
+                arguments={"content": content, "deck_id": deck_id, "user_id": user_id},
             )
 
             # ✔️ usa structuredContent (camelCase)
@@ -96,13 +96,13 @@ async def mcp_call_create_new_card(content: Dict[str, Any], deck_id: str):
             return structured
 
 
-def call_create_new_card_sync(content: Dict[str, Any], deck_id: str) -> Dict[str, Any]:
+def call_create_new_card_sync(content: Dict[str, Any], deck_id: str, user_id: str) -> Dict[str, Any]:
     """Wrapper síncrono pra usar em código não-async (ex: FastAPI em threadpool)."""
-    return asyncio.run(mcp_call_create_new_card(content, deck_id))
+    return asyncio.run(mcp_call_create_new_card(content, deck_id, user_id))
 
 
-async def mcp_call_get_all_decks():
-    print(f"[MCP CLIENT] Chamando MCP get_all_decks()")
+async def mcp_call_get_all_decks(user_id: str):
+    print(f"[MCP CLIENT] Chamando MCP get_all_decks(user_id={user_id!r})")
 
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -110,7 +110,7 @@ async def mcp_call_get_all_decks():
 
             result = await session.call_tool(
                 "get_all_decks",
-                arguments={},
+                arguments={"user_id": user_id},
             )
 
             # ✔️ usa structuredContent (camelCase)
@@ -130,13 +130,13 @@ async def mcp_call_get_all_decks():
             return structured
 
 
-def call_get_all_decks_sync() -> Dict[str, Any]:
+def call_get_all_decks_sync(user_id: str) -> Dict[str, Any]:
     """Wrapper síncrono pra usar em código não-async (ex: FastAPI em threadpool)."""
-    return asyncio.run(mcp_call_get_all_decks())
+    return asyncio.run(mcp_call_get_all_decks(user_id))
 
 
-async def mcp_call_create_new_deck(name: str, type: str = "speech"):
-    print(f"[MCP CLIENT] Chamando MCP create_new_deck(name={name!r}, type={type!r})")
+async def mcp_call_create_new_deck(name: str, user_id: str, type: str = "speech"):
+    print(f"[MCP CLIENT] Chamando MCP create_new_deck(name={name!r}, user_id={user_id!r}, type={type!r})")
 
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -144,7 +144,7 @@ async def mcp_call_create_new_deck(name: str, type: str = "speech"):
 
             result = await session.call_tool(
                 "create_new_deck",
-                arguments={"name": name, "type": type},
+                arguments={"name": name, "user_id": user_id, "type": type},
             )
 
             # ✔️ usa structuredContent (camelCase)
@@ -164,6 +164,6 @@ async def mcp_call_create_new_deck(name: str, type: str = "speech"):
             return structured
 
 
-def call_create_new_deck_sync(name: str, type: str = "speech") -> Dict[str, Any]:
+def call_create_new_deck_sync(name: str, user_id: str, type: str = "speech") -> Dict[str, Any]:
     """Wrapper síncrono pra usar em código não-async (ex: FastAPI em threadpool)."""
-    return asyncio.run(mcp_call_create_new_deck(name, type))
+    return asyncio.run(mcp_call_create_new_deck(name, user_id, type))

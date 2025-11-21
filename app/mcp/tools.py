@@ -56,8 +56,12 @@ TOOLS = [
                         "type": "string",
                         "description": "The public ID of the deck where the card will be created.",
                     },
+                    "user_id": {
+                        "type": "string",
+                        "description": "The user ID who owns this card.",
+                    },
                 },
-                "required": ["content", "deck_id"],
+                "required": ["content", "deck_id", "user_id"],
             },
         },
     },
@@ -65,11 +69,16 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_all_decks",
-            "description": "Retrieves all available decks. Returns a list of decks with: public_id: str, name: str, type: Literal['speech', 'shadowing'], due_cards: int, total_cards: int",
+            "description": "Retrieves all available decks for a specific user. Returns a list of decks with: public_id: str, name: str, type: Literal['speech', 'shadowing'], due_cards: int, total_cards: int",
             "parameters": {
                 "type": "object",
-                "properties": {},
-                "required": [],
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "The user ID to filter decks.",
+                    },
+                },
+                "required": ["user_id"],
             },
         },
     },
@@ -85,13 +94,17 @@ TOOLS = [
                         "type": "string",
                         "description": "Name of the new deck.",
                     },
+                    "user_id": {
+                        "type": "string",
+                        "description": "The user ID who owns this deck.",
+                    },
                     "type": {
                         "type": "string",
                         "description": "Type of the deck: 'speech' or 'shadowing'. Default is 'speech'.",
                         "enum": ["speech", "shadowing"]
                     }
                 },
-                "required": ["name"],
+                "required": ["name", "user_id"],
             },
         },
     }

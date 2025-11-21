@@ -59,7 +59,7 @@ from app.schemas import (
     ReviewIn,
     ReviewIn,
     ReviewOut, EvalResponse, EvalRequest, AudioB64,
-    GoogleAuthRequest, Token,
+    GoogleAuthRequest, Token, UserOut, UserUpdate,
 )
 from app.services.other_services import DeckService, CardService, ReviewService
 from app.services.auth_service import AuthService
@@ -459,6 +459,7 @@ def evaluate(
 def chat_stream(
         payload: dict = Body(...),
         chat_service: ChatService = Depends(get_chat_services),
+        user_id: str = Depends(get_current_user_id),
 ):
     """
     Recebe:
@@ -472,7 +473,7 @@ def chat_stream(
     user_message = payload.get("user_message", "")
 
     return StreamingResponse(
-        chat_service.generate_answer_stream(history, user_message),
+        chat_service.generate_answer_stream(history, user_message, user_id),
         media_type="text/plain",
     )
 
@@ -499,6 +500,37 @@ def login_google(
         return {"access_token": access_token, "token_type": "bearer"}
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
+
+
+@app.get("/users", response_model=UserOut)
+def get_user_info(
+    user_id: str = Depends(get_current_user_id),
+    user_service: UserService = Depends(get_user_service),
+):
+    """
+    Returns information about the currently authenticated user.
+    The user ID is extracted from the JWT token.
+    """
+    user = user_service.get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+@app.patch("/users", response_model=UserOut)
+def update_user_info(
+    payload: UserUpdate,
+    user_id: str = Depends(get_current_user_id),
+    user_service: UserService = Depends(get_user_service),
+):
+    """
+    Updates information for the currently authenticated user (partial update).
+    The user ID is extracted from the JWT token.
+    """
+    updated_user = user_service.update_user(user_id, payload)
+    if not updated_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return updated_user
 
 
 @app.post("/logout", status_code=204)

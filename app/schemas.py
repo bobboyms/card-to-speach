@@ -166,6 +166,8 @@ class UserCreate(BaseModel):
     email: str
     name: Optional[str] = None
     google_id: Optional[str] = None
+    language: Literal["PT-BR", "EN"] = "EN"
+    new_user: bool = True
 
 
 class UserOut(BaseModel):
@@ -174,6 +176,15 @@ class UserOut(BaseModel):
     name: Optional[str]
     google_id: Optional[str]
     created_at: str
+    language: str
+    new_user: bool
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    language: Optional[Literal["PT-BR", "EN"]] = None
+    new_user: Optional[bool] = None
 
 
 class Token(BaseModel):

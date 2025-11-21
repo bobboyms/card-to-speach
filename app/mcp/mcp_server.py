@@ -55,7 +55,8 @@ from fastapi import HTTPException
 @mcp.tool()
 def create_new_card(
     content: Dict[str, Any] = Field(..., description="Structured card content. Must contain 'phrase' key."),
-    deck_id: str = Field(..., description="Deck ID or Deck Name")
+    deck_id: str = Field(..., description="Deck ID or Deck Name"),
+    user_id: str = Field(..., description="User ID who owns this card")
 ) -> Dict[str, Any]:
     """Create a new card in the specified deck."""
     
@@ -75,7 +76,7 @@ def create_new_card(
             pass
 
     payload = CardCreate(content=content, deck_id=target_deck_id)
-    card = card_service.create(payload)
+    card = card_service.create(payload, user_id)
  
     return {
         "public_id": card.public_id,
@@ -89,17 +90,18 @@ def create_new_card(
 @mcp.tool()
 def create_new_deck(
     name: str = Field(..., description="Name of the new deck"),
+    user_id: str = Field(..., description="User ID who owns this deck"),
     type: str = Field("speech", description="Type of the deck: 'speech' or 'shadowing'")
 ) -> Dict[str, Any]:
     """Create a new deck."""
     payload = DeckCreate(name=name, type=type)
-    deck = deck_service.create(payload)
+    deck = deck_service.create(payload, user_id)
     return deck.model_dump()
 
 
 @mcp.tool()
-def get_all_decks() -> List[DeckOut]:
-    return deck_service.list()
+def get_all_decks(user_id: str = Field(..., description="User ID to filter decks")) -> List[DeckOut]:
+    return deck_service.list(user_id)
 
 
 if __name__ == "__main__":

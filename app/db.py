@@ -43,6 +43,8 @@ class DatabaseManager:
             self._ensure_revoked_tokens_table(connection)
             self._ensure_deck_user_id_column(connection)
             self._ensure_card_user_id_column(connection)
+            self._ensure_user_language_column(connection)
+            self._ensure_user_new_user_column(connection)
             self._ensure_indexes(connection)
 
     @staticmethod
@@ -319,6 +321,18 @@ class DatabaseManager:
         """Ensure cards table tracks the user_id."""
         if not DatabaseManager._column_exists(conn_obj, "cards", "user_id"):
             conn_obj.execute("ALTER TABLE cards ADD COLUMN user_id TEXT")
+
+    @staticmethod
+    def _ensure_user_language_column(conn_obj: sqlite3.Connection) -> None:
+        """Ensure users table has language column with default EN."""
+        if not DatabaseManager._column_exists(conn_obj, "users", "language"):
+            conn_obj.execute("ALTER TABLE users ADD COLUMN language TEXT NOT NULL DEFAULT 'EN'")
+
+    @staticmethod
+    def _ensure_user_new_user_column(conn_obj: sqlite3.Connection) -> None:
+        """Ensure users table has new_user column with default True."""
+        if not DatabaseManager._column_exists(conn_obj, "users", "new_user"):
+            conn_obj.execute("ALTER TABLE users ADD COLUMN new_user INTEGER NOT NULL DEFAULT 1")
 
     @staticmethod
     def _ensure_revoked_tokens_table(conn_obj: sqlite3.Connection) -> None:
