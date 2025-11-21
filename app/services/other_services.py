@@ -48,6 +48,13 @@ class DeckService:
             raise HTTPException(status_code=404, detail="Deck not found")
         return row
 
+    def get_by_name(self, name: str) -> Mapping[str, Any]:
+        """Return deck information by its name."""
+        row = self._repo.find_by_name(name)
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Deck '{name}' not found")
+        return row
+
     def create(self, payload: DeckCreate) -> DeckOut:
         """Create a new deck and return its representation."""
         name = payload.name.strip()

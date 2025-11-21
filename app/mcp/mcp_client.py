@@ -99,3 +99,71 @@ async def mcp_call_create_new_card(content: Dict[str, Any], deck_id: str):
 def call_create_new_card_sync(content: Dict[str, Any], deck_id: str) -> Dict[str, Any]:
     """Wrapper síncrono pra usar em código não-async (ex: FastAPI em threadpool)."""
     return asyncio.run(mcp_call_create_new_card(content, deck_id))
+
+
+async def mcp_call_get_all_decks():
+    print(f"[MCP CLIENT] Chamando MCP get_all_decks()")
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            result = await session.call_tool(
+                "get_all_decks",
+                arguments={},
+            )
+
+            # ✔️ usa structuredContent (camelCase)
+            structured = result.structuredContent
+
+            # Check for errors
+            if result.isError:
+                error_msg = "Unknown error"
+                if result.content and hasattr(result.content[0], 'text'):
+                    error_msg = result.content[0].text
+                return {"error": error_msg}
+
+            # se o servidor devolver {"result": {...}}
+            if isinstance(structured, dict) and "result" in structured:
+                structured = structured["result"]
+
+            return structured
+
+
+def call_get_all_decks_sync() -> Dict[str, Any]:
+    """Wrapper síncrono pra usar em código não-async (ex: FastAPI em threadpool)."""
+    return asyncio.run(mcp_call_get_all_decks())
+
+
+async def mcp_call_create_new_deck(name: str, type: str = "speech"):
+    print(f"[MCP CLIENT] Chamando MCP create_new_deck(name={name!r}, type={type!r})")
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            result = await session.call_tool(
+                "create_new_deck",
+                arguments={"name": name, "type": type},
+            )
+
+            # ✔️ usa structuredContent (camelCase)
+            structured = result.structuredContent
+
+            # Check for errors
+            if result.isError:
+                error_msg = "Unknown error"
+                if result.content and hasattr(result.content[0], 'text'):
+                    error_msg = result.content[0].text
+                return {"error": error_msg}
+
+            # se o servidor devolver {"result": {...}}
+            if isinstance(structured, dict) and "result" in structured:
+                structured = structured["result"]
+
+            return structured
+
+
+def call_create_new_deck_sync(name: str, type: str = "speech") -> Dict[str, Any]:
+    """Wrapper síncrono pra usar em código não-async (ex: FastAPI em threadpool)."""
+    return asyncio.run(mcp_call_create_new_deck(name, type))

@@ -39,6 +39,8 @@ class DatabaseManager:
             self._ensure_due_ts_column(connection)
             self._ensure_card_public_id_column(connection)
             self._ensure_card_deck_id_column(connection)
+            self._ensure_users_table(connection)
+            self._ensure_revoked_tokens_table(connection)
             self._ensure_indexes(connection)
 
     @staticmethod
@@ -284,6 +286,36 @@ class DatabaseManager:
                     (deck["public_id"], row["id"]),
                 )
         conn_obj.execute("CREATE INDEX IF NOT EXISTS idx_cards_deck_id ON cards(deck_id);")
+
+    @staticmethod
+    def _ensure_users_table(conn_obj: sqlite3.Connection) -> None:
+        """Create the users table if it does not exist."""
+        conn_obj.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL UNIQUE,
+                name TEXT,
+                google_id TEXT UNIQUE,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+
+    @staticmethod
+    def _ensure_revoked_tokens_table(conn_obj: sqlite3.Connection) -> None:
+        """Create the revoked_tokens table if it does not exist."""
+        conn_obj.execute(
+            """
+            CREATE TABLE IF NOT EXISTS revoked_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL UNIQUE,
+                revoked_at TEXT NOT NULL
+            );
+            """
+        )
+
 
 
 db_manager = DatabaseManager(DB_PATH)

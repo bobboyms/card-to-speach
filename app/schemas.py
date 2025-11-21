@@ -160,3 +160,26 @@ class EvalResponse(BaseModel):
     intelligibility: IntelligibilityOut
     phonetic_analysis: PhoneticAnalysisOut
     meta: Dict[str, Any]
+
+
+class UserCreate(BaseModel):
+    email: str
+    name: Optional[str] = None
+    google_id: Optional[str] = None
+
+
+class UserOut(BaseModel):
+    public_id: str
+    email: str
+    name: Optional[str]
+    google_id: Optional[str]
+    created_at: str
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class GoogleAuthRequest(BaseModel):
+    token: str

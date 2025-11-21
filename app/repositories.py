@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 import sqlite3
 
@@ -270,3 +270,80 @@ class CardRepository:
                     (deck_id,),
                 ).fetchone()
             return row
+
+
+class UserRepository:
+    """Persistence layer responsible for user CRUD operations."""
+
+    def __init__(self, db: DatabaseManager):
+        self._db = db
+
+    def find_by_google_id(self, google_id: str) -> Optional[sqlite3.Row]:
+        with self._db.connect() as connection:
+            return connection.execute(
+                "SELECT * FROM users WHERE google_id = ?", (google_id,)
+            ).fetchone()
+
+    def find_by_email(self, email: str) -> Optional[sqlite3.Row]:
+        with self._db.connect() as connection:
+            return connection.execute(
+                "SELECT * FROM users WHERE email = ?", (email,)
+            ).fetchone()
+
+    def find_by_public_id(self, public_id: str) -> Optional[sqlite3.Row]:
+        with self._db.connect() as connection:
+            return connection.execute(
+                "SELECT * FROM users WHERE public_id = ?", (public_id,)
+            ).fetchone()
+
+    def create(
+        self, public_id: str, email: str, name: Optional[str], google_id: Optional[str], created_at: str
+    ) -> sqlite3.Row:
+        with self._db.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO users (public_id, email, name, google_id, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (public_id, email, name, google_id, created_at),
+            )
+            return connection.execute(
+                "SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+
+    def update_google_id(self, user_id: int, google_id: str) -> sqlite3.Row:
+        with self._db.connect() as connection:
+            connection.execute(
+                "UPDATE users SET google_id = ? WHERE id = ?",
+                (google_id, user_id),
+            )
+            return connection.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+
+
+class AuthRepository:
+    """Persistence layer responsible for authentication-related operations (e.g., token revocation)."""
+
+    def __init__(self, db: DatabaseManager):
+        self._db = db
+
+    def revoke_token(self, token: str) -> None:
+        with self._db.connect() as conn:
+            revoked_at = datetime.now(timezone.utc).isoformat()
+            try:
+                conn.execute(
+                    "INSERT INTO revoked_tokens (token, revoked_at) VALUES (?, ?)",
+                    (token, revoked_at),
+                )
+                conn.commit()
+            except Exception:
+                # Log error in service layer if needed, or re-raise
+                raise
+
+    def is_token_revoked(self, token: str) -> bool:
+        with self._db.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM revoked_tokens WHERE token = ?", (token,)
+            ).fetchone()
+            return row is not None

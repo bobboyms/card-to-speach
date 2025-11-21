@@ -60,5 +60,39 @@ TOOLS = [
                 "required": ["content", "deck_id"],
             },
         },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_all_decks",
+            "description": "Retrieves all available decks. Returns a list of decks with: public_id: str, name: str, type: Literal['speech', 'shadowing'], due_cards: int, total_cards: int",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_new_deck",
+            "description": "Creates a new deck.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the new deck.",
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Type of the deck: 'speech' or 'shadowing'. Default is 'speech'.",
+                        "enum": ["speech", "shadowing"]
+                    }
+                },
+                "required": ["name"],
+            },
+        },
     }
 ]

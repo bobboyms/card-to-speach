@@ -36,8 +36,9 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, List
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer
 from dotenv import load_dotenv
 from starlette.responses import StreamingResponse
 
@@ -45,7 +46,7 @@ from app import config, time_utils
 from app.db import db_manager
 from app.services.chat_service import ChatService
 from app.services.evaluate import evaluate_pronunciation, format_eval_response
-from app.repositories import CardRepository, DeckRepository
+from app.repositories import CardRepository, DeckRepository, UserRepository, AuthRepository
 from app.schemas import (
     CardCreate,
     CardOut,
@@ -56,9 +57,13 @@ from app.schemas import (
     DeckRename,
     ReviewButtonIn,
     ReviewIn,
+    ReviewIn,
     ReviewOut, EvalResponse, EvalRequest, AudioB64,
+    GoogleAuthRequest, Token,
 )
 from app.services.other_services import DeckService, CardService, ReviewService
+from app.services.auth_service import AuthService
+from app.services.user_service import UserService
 from app.services.text_to_speech import TextToSpeach
 from app.utils.b64 import b64_to_temp_audio_file, mp3_to_base64
 
@@ -154,6 +159,66 @@ def get_evaluate_pronunciation() -> Callable[[str, str, str], Dict[str, Any]]:
     return evaluate_pronunciation
 
 
+def get_user_repository() -> UserRepository:
+    return UserRepository(db_manager)
+
+
+def get_user_service(
+    repo: UserRepository = Depends(get_user_repository),
+) -> UserService:
+    return UserService(repo)
+
+
+def get_auth_repository() -> AuthRepository:
+    return AuthRepository(db_manager)
+
+
+def get_auth_service(
+    user_service: UserService = Depends(get_user_service),
+    auth_repository: AuthRepository = Depends(get_auth_repository),
+) -> AuthService:
+    return AuthService(user_service, auth_repository)
+
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/google", auto_error=False)
+
+
+async def verify_auth_global(
+    request: Request,
+    token: str = Depends(oauth2_scheme),
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    # List of paths that do not require authentication
+    allowed_paths = [
+        "/auth/google",
+        "/health",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+    ]
+
+    if request.url.path in allowed_paths:
+        return
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        if auth_service.is_token_revoked(token):
+            raise ValueError("Token has been revoked")
+        auth_service.verify_jwt(token)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 # ---------------
 # FastAPI (app)
 # ---------------
@@ -164,7 +229,12 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Anki Mini API", version="3.3 (normalize day start)", lifespan=lifespan)
+app = FastAPI(
+    title="Anki Mini API",
+    version="3.3 (normalize day start)",
+    lifespan=lifespan,
+    dependencies=[Depends(verify_auth_global)],
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -370,6 +440,42 @@ def chat_stream(
         chat_service.generate_answer_stream(history, user_message),
         media_type="text/plain",
     )
+
+
+# ------------------------
+# Endpoints – Auth
+# ------------------------
+@app.post("/auth/google", response_model=Token)
+def login_google(
+    payload: GoogleAuthRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    """
+    Receives a Google ID token, verifies it, creates/retrieves the user,
+    and returns an application JWT.
+    """
+    try:
+        google_user = auth_service.verify_google_token(payload.token)
+        user = auth_service.get_or_create_user(google_user)
+        access_token = auth_service.create_access_token(
+            data={"sub": user.public_id, "user_id": user.public_id, "email": user.email}
+        )
+
+        return {"access_token": access_token, "token_type": "bearer"}
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+@app.post("/logout", status_code=204)
+def logout(
+    token: str = Depends(oauth2_scheme),
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    """
+    Invalidate the current token by adding it to the blacklist.
+    """
+    auth_service.revoke_token(token)
+    return
 
 # ------------------------
 # Healthcheck

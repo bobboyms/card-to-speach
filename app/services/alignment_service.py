@@ -83,37 +83,58 @@ class ForcedAlignmentService:
     def _trellis(emission: torch.Tensor, tokens: List[int], blank_id: int = 0) -> torch.Tensor:
         T = emission.size(0)
         J = len(tokens)
-        trellis = torch.zeros((T, J))
-        trellis[1:, 0] = torch.cumsum(emission[1:, blank_id], 0)
-        trellis[0, 1:] = -float("inf")
-        trellis[-J + 1:, 0] = float("inf")
-        for t in range(T - 1):
-            trellis[t + 1, 1:] = torch.maximum(
-                trellis[t, 1:] + emission[t, blank_id],
-                trellis[t, :-1] + emission[t, tokens[1:]],
-            )
+        trellis = torch.full((T, J), -float("inf"))
+
+        # Initial frame (t=0)
+        # Start at the first blank
+        trellis[0, 0] = emission[0, tokens[0]]
+        # Or the first token if it exists (optional, but standard CTC allows starting at blank or first symbol)
+        if J > 1:
+            trellis[0, 1] = emission[0, tokens[1]]
+
+        for t in range(1, T):
+            # Emission scores for all states at time t
+            emission_t = emission[t, tokens]
+            
+            # Previous scores
+            prev = trellis[t - 1]
+            
+            # Shifted previous scores for transition from j-1
+            # We prepend -inf to align indices: prev_shifted[j] corresponds to prev[j-1]
+            prev_shifted = torch.cat([torch.tensor([-float("inf")]).to(prev.device), prev[:-1]])
+            
+            # Update trellis: max(stay, change) + emission
+            trellis[t] = emission_t + torch.maximum(prev, prev_shifted)
+
         return trellis
 
     @staticmethod
     def _backtrack(trellis: torch.Tensor, emission: torch.Tensor, tokens: List[int], blank_id: int = 0) -> List[_Point]:
         t, j = trellis.size(0) - 1, trellis.size(1) - 1
-        path = [_Point(j, t, emission[t, blank_id].exp().item())]
-        while j > 0:
-            if t <= 0:
-                raise AlignmentFailedError("trellis exhausted before all tokens were matched")
-            p_stay = emission[t - 1, blank_id]
-            p_change = emission[t - 1, tokens[j]]
-            stayed = trellis[t - 1, j] + p_stay
-            changed = trellis[t - 1, j - 1] + p_change
-            t -= 1
-            if changed > stayed:
-                j -= 1
-            prob = (p_change if changed > stayed else p_stay).exp().item()
-            path.append(_Point(j, t, prob))
+        
+        # Check if the final state is valid
+        if trellis[t, j] == -float("inf"):
+             raise AlignmentFailedError("No valid path found in trellis.")
+
+        prob = emission[t, tokens[j]].exp().item()
+        path = [_Point(j, t, prob)]
+
         while t > 0:
-            prob = emission[t - 1, blank_id].exp().item()
-            path.append(_Point(0, t - 1, prob))
+            # Determine if we stayed (j) or changed (j-1)
+            step_stay = trellis[t - 1, j]
+            step_change = -float("inf")
+            if j > 0:
+                step_change = trellis[t - 1, j - 1]
+            
+            # Greedy choice: if change is possible and has better or equal score, we might take it.
+            # Standard Viterbi takes max.
+            if j > 0 and step_change >= step_stay:
+                j -= 1
+            
             t -= 1
+            prob = emission[t, tokens[j]].exp().item()
+            path.append(_Point(j, t, prob))
+
         return path[::-1]
 
     @staticmethod
