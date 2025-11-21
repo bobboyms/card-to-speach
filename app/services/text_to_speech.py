@@ -9,7 +9,11 @@ from app.utils.files import ensure_directory_exists
 
 class TextToSpeach:
     def __init__(self):
-        pass
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise EnvironmentError("OPENAI_API_KEY not set in environment variables.")
+
+        self.client = OpenAI(api_key=openai_api_key)
 
     def generate_tts_audio(self, text: str, output_dir: Path = Path("temp_files")) -> Tuple[str, Path]:
         """
@@ -26,13 +30,9 @@ class TextToSpeach:
         unique_name = f"{uuid.uuid4()}.mp3"
         output_path = output_dir / unique_name
 
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not openai_api_key:
-            raise EnvironmentError("OPENAI_API_KEY not set in environment variables.")
 
-        client = OpenAI(api_key=openai_api_key)
         try:
-            tts_response = client.audio.speech.create(
+            tts_response = self.client.audio.speech.create(
                 model="tts-1", voice="alloy", input=text
             )
             tts_response.stream_to_file(output_path)

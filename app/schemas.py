@@ -63,6 +63,21 @@ class CardUpdate(BaseModel):
         return value
 
 
+    # public_id: str
+    # content: Dict[{
+    #     phrase:str,
+    #     audio:str,
+    # }]
+    # deck_id: Optional[str]
+    # deck_name: Optional[str]
+    # tags: Optional[List[str]]
+    # repetitions: int
+    # interval: int
+    # efactor: float
+    # due: str
+    # last_reviewed: Optional[str]
+    # lapses: int
+
 class CardOut(BaseModel):
     public_id: str
     content: Dict[str, Any]
@@ -75,6 +90,10 @@ class CardOut(BaseModel):
     due: str
     last_reviewed: Optional[str]
     lapses: int
+
+class AudioB64(BaseModel):
+    audio_id: str
+    b64: str
 
 
 class ReviewIn(BaseModel):

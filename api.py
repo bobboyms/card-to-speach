@@ -39,9 +39,11 @@ from typing import Any, Callable, Dict, List
 from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from starlette.responses import StreamingResponse
 
 from app import config, time_utils
 from app.db import db_manager
+from app.services.chat_service import ChatService
 from app.services.evaluate import evaluate_pronunciation, format_eval_response
 from app.repositories import CardRepository, DeckRepository
 from app.schemas import (
@@ -54,11 +56,11 @@ from app.schemas import (
     DeckRename,
     ReviewButtonIn,
     ReviewIn,
-    ReviewOut, EvalResponse, EvalRequest,
+    ReviewOut, EvalResponse, EvalRequest, AudioB64,
 )
 from app.services.other_services import DeckService, CardService, ReviewService
 from app.services.text_to_speech import TextToSpeach
-from app.utils.b64 import b64_to_temp_audio_file
+from app.utils.b64 import b64_to_temp_audio_file, mp3_to_base64
 
 # ---------------------------------
 # Configuration (database and learning policy)
@@ -144,6 +146,9 @@ def get_review_service(
         lambda: MIN_EF,
     )
 
+
+def get_chat_services() -> ChatService:
+    return ChatService()
 
 def get_evaluate_pronunciation() -> Callable[[str, str, str], Dict[str, Any]]:
     return evaluate_pronunciation
@@ -271,6 +276,15 @@ def delete_card(
     card_service.delete(card_public_id)
     return
 
+@app.get("/audio/{audio_id}", response_model=AudioB64)
+def delete_card(
+    audio_id: str,
+):
+    b64 = mp3_to_base64(str("temp_files/" + audio_id))
+    return AudioB64(
+        audio_id=audio_id,
+        b64=b64,
+    )
 
 # ------------------------
 # Endpoints – Reviews
@@ -335,6 +349,27 @@ def evaluate(
 
     return format_eval_response(raw_results, req.phoneme_fmt)
 
+
+@app.post("/chat-stream")
+def chat_stream(
+        payload: dict = Body(...),
+        chat_service: ChatService = Depends(get_chat_services),
+):
+    """
+    Recebe:
+      {
+        "history": [{"role": "user"|"assistant", "content": "..."}],
+        "user_message": "texto"
+      }
+    Responde com um stream de texto (chunks) da resposta final.
+    """
+    history = payload.get("history", [])
+    user_message = payload.get("user_message", "")
+
+    return StreamingResponse(
+        chat_service.generate_answer_stream(history, user_message),
+        media_type="text/plain",
+    )
 
 # ------------------------
 # Healthcheck

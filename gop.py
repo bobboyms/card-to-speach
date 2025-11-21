@@ -2125,7 +2125,8 @@ class PronEvaluator:
         # Carrega processor/modelo uma única vez
         self.processor = AutoProcessor.from_pretrained(model_id)
         print("model_id:", model_id)
-        base_model = AutoModelForCTC.from_pretrained(model_id)
+        base_model = AutoModelForCTC.from_pretrained(model_id) #,
+        print("memory_footprint:", base_model.get_memory_footprint())
 
         # torch.compile (quando disponível) pode dar ganho em CPU/CUDA
         try:
