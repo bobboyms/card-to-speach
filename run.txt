@@ -1,0 +1,1 @@
+podman-compose --podman-build-args="--platform linux/amd64" --podman-run-args="--platform linux/amd64" up --build --no-cache

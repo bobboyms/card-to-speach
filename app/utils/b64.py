@@ -42,7 +42,23 @@ def b64_to_temp_audio_file(b64_str: str) -> str:
 
 def mp3_to_base64(path: Union[str, os.PathLike]) -> str:
     """Converte um arquivo MP3 em uma string Base64 simples."""
-    p = Path(path)
+    p = Path(path).resolve()
+    
+    # Security check: ensure path is within temp_files or gravacoes
+    allowed_dirs = [
+        Path("temp_files").resolve(),
+        Path("gravacoes").resolve()
+    ]
+    
+    is_allowed = False
+    for allowed_dir in allowed_dirs:
+        if str(p).startswith(str(allowed_dir)):
+            is_allowed = True
+            break
+            
+    if not is_allowed:
+         raise HTTPException(status_code=403, detail="Access denied: File outside allowed directories")
+
     if not p.is_file():
         raise FileNotFoundError(f"Arquivo não encontrado: {p}")
     if p.suffix.lower() != ".mp3":

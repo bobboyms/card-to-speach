@@ -18,8 +18,13 @@ LEARN_AHEAD_IF_EMPTY: bool = True
 NORMALIZE_TO_DAY_START: bool = True
 TIMEZONE = timezone.utc
 
+import os
+
 # Google Auth & JWT
-GOOGLE_CLIENT_ID = "391853776253-6gv4td2darv8ojosjs781fv9hugs86pl.apps.googleusercontent.com"
-JWT_SECRET = "b2af1bfdb64b48824d7ccc4056413b2f"
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRES_MINUTES = 60
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID") or "391853776253-6gv4td2darv8ojosjs781fv9hugs86pl.apps.googleusercontent.com"
+JWT_SECRET = os.getenv("JWT_SECRET", "b2af1bfdb64b48824d7ccc4056413b2f")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRES_MINUTES = int(os.getenv("JWT_EXPIRES_MINUTES", 60))
+
+# CORS
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")

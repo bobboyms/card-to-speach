@@ -3,10 +3,10 @@ name = "mini-elsa"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
     "accelerate>=1.10.1",
-    "audioop-lts>=0.2.2",
+
     "av>=16.0.1",
     "cmudict>=1.1.1",
     "fastapi>=0.119.1",
@@ -14,7 +14,7 @@ dependencies = [
     "httpx>=0.28.1",
     "jiwer>=4.0.0",
     "librosa>=0.11.0",
-    "mlx-whisper>=0.4.3",
+
     "numba>=0.62.1",
     "numpy>=2.3.4",
     "onnxruntime>=1.23.2",
@@ -30,15 +30,14 @@ dependencies = [
     "pytest>=8.4.2",
     "rapidfuzz>=3.14.1",
     "setuptools-rust>=1.12.0",
-    "snakeviz>=2.2.2",
+
     "soundfile>=0.13.1",
-    "streamlit>=1.50.0",
-    "streamlit-js-eval>=0.1.7",
-    "streamlit-webrtc>=0.63.11",
+
     "supermemo2>=3.0.1",
     "torch>=2.9.0",
     "torchaudio>=2.9.0",
     "torchcodec>=0.8.1",
+
     "torchvision>=0.24.0",
     "transformers[torch]>=4.57.1",
     "uvicorn>=0.38.0",

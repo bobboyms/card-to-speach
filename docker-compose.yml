@@ -1,0 +1,15 @@
+services:
+  mini-elsa:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - GOOGLE_CLIENT_ID=391853776253-6gv4td2darv8ojosjs781fv9hugs86pl.apps.googleusercontent.com
+      - JWT_SECRET=b2af1bfdb64b48824d7ccc4056413b2f
+      - JWT_ALGORITHM=HS256
+      - JWT_EXPIRES_MINUTES=60
+      - CORS_ORIGINS=*
+      - TZ=America/New_York
+    volumes:
+      - ./anki_mini.db:/app/anki_mini.db
+      - ./gravacoes:/app/gravacoes

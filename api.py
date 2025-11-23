@@ -266,7 +266,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=config.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -380,9 +380,13 @@ def delete_card(
     return
 
 @app.get("/audio/{audio_id}", response_model=AudioB64)
-def delete_card(
+def get_audio(
     audio_id: str,
 ):
+    # Basic validation to prevent path traversal
+    if ".." in audio_id or "/" in audio_id or "\\" in audio_id:
+        raise HTTPException(status_code=400, detail="Invalid audio ID")
+        
     b64 = mp3_to_base64(str("temp_files/" + audio_id))
     return AudioB64(
         audio_id=audio_id,
@@ -559,4 +563,4 @@ def health():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("api:app", host="127.0.0.1", port=8000, reload=True)
