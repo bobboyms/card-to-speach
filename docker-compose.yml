@@ -10,6 +10,20 @@ services:
       - JWT_EXPIRES_MINUTES=60
       - CORS_ORIGINS=*
       - TZ=America/New_York
+      - GRPC_ENDPOINT=inference-server:50051
     volumes:
       - ./anki_mini.db:/app/anki_mini.db
       - ./gravacoes:/app/gravacoes
+    depends_on:
+      - inference-server
+
+  inference-server:
+    image: localhost/inference_server_inference-server
+    ports:
+      - "50051:50051"
+    environment:
+      - GRPC_HOST=0.0.0.0
+      - GRPC_PORT=50051
+      - GRPC_MAX_WORKERS=4
+      - GRPC_LOG_LEVEL=INFO
+    command: [ "python", "-m", "grpc_server" ]

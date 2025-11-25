@@ -9,16 +9,17 @@ from app.mcp.mcp_client import call_generate_tts_audio_sync, call_pronunciation_
 # Se tiver uma função para pronúncia, importe-a aqui também, ex:
 # from app.mcp.mcp_client import call_pronunciation_practice_sync
 from app.mcp.tools import TOOLS
+from app import config
 
 
 class ChatService:
-    def __init__(self, model_name="gpt-4o-mini"):  # Corrigido para um modelo válido
+    def __init__(self, model_name=None):
         openai_api_key = os.getenv("OPENAI_API_KEY")
         if not openai_api_key:
             raise EnvironmentError("OPENAI_API_KEY not set in environment variables.")
 
         self.client = OpenAI(api_key=openai_api_key)
-        self.model_name = model_name
+        self.model_name = model_name or config.OPENAI_MODEL
 
     def _extract_deck_id(self, history) -> str | None:
         """

@@ -2126,7 +2126,7 @@ class PronEvaluator:
         self.processor = AutoProcessor.from_pretrained(model_id)
         print("model_id:", model_id)
         base_model = AutoModelForCTC.from_pretrained(model_id) #,
-        print("memory_footprint:", base_model.get_memory_footprint())
+        # print("memory_footprint:", base_model.get_memory_footprint())
 
         # torch.compile (quando disponível) pode dar ganho em CPU/CUDA
         try:
@@ -3026,7 +3026,7 @@ def formater_output(data):
 if __name__ == "__main__":
     service = get_pron_service()
     # "meu_audio.wav" "audio.mp3"
-    result = service.evaluate("audio.mp3", "She look guilty after lying to her friend")
+    result = service.evaluate("meu_audio.wav", "She look guilty after lying to her friend")
 
     data = formater_output(result["sentence_metrics"])
     print(data)

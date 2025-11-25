@@ -1,0 +1,42 @@
+name: Build Docker Image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region us-east-2 | docker login \
+            --username AWS \
+            --password-stdin 933232225191.dkr.ecr.us-east-2.amazonaws.com 
+
+      - name: Build image
+        run: |
+          docker build -t hispeakers/backend-core .
+
+      - name: Tag image
+        run: |
+          docker tag hispeakers/backend-core:latest \
+            933232225191.dkr.ecr.us-east-2.amazonaws.com/hispeakers/backend-core:latest
+
+      - name: Push image
+        run: |
+          docker push 933232225191.dkr.ecr.us-east-2.amazonaws.com/hispeakers/backend-core:latest

@@ -5,44 +5,29 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "accelerate>=1.10.1",
-
-    "av>=16.0.1",
-    "cmudict>=1.1.1",
     "fastapi>=0.119.1",
-    "g2p-en>=2.1.0",
+    "grpcio-tools>=1.76.0",
+    "grpcio>=1.76.0",
+    "google-auth>=2.43.0",
     "httpx>=0.28.1",
-    "jiwer>=4.0.0",
-    "librosa>=0.11.0",
-
-    "numba>=0.62.1",
+    "mcp[cli]>=1.21.2",
     "numpy>=2.3.4",
-    "onnxruntime>=1.23.2",
     "openai>=2.7.1",
-    "openai-whisper>=20250625",
-    "phonecodes>=1.2.2",
-    "phonemizer>=3.3.0",
-    "praat-parselmouth>=0.4.6",
     "protobuf>=6.33.0",
     "pydantic>=2.12.3",
-    "pydub>=0.25.1",
-    "python-dotenv>=1.0.1",
     "pytest>=8.4.2",
-    "rapidfuzz>=3.14.1",
-    "setuptools-rust>=1.12.0",
-
-    "soundfile>=0.13.1",
-
-    "supermemo2>=3.0.1",
-    "torch>=2.9.0",
-    "torchaudio>=2.9.0",
-    "torchcodec>=0.8.1",
-
-    "torchvision>=0.24.0",
-    "transformers[torch]>=4.57.1",
-    "uvicorn>=0.38.0",
-    "whisper-timestamped>=1.15.9",
-    "mcp[cli]>=1.21.2",
-    "google-auth>=2.43.0",
+    "python-dotenv>=1.0.1",
     "python-jose[cryptography]>=3.5.0",
+    "supermemo2>=3.0.1",
+    "uvicorn>=0.38.0",
+    "requests>=2.32.5",
 ]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+exclude = ["uploads*", "gravacoes*", "temp_files*", "words_by_ctc*", "tests*"]
